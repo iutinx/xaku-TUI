@@ -7,10 +7,12 @@ import {
   listInstalledModels,
   streamCompletion,
   type ToolCallInProgress,
-} from './ollama.js';
-import { parseCommand } from './commands.js';
-import { estimateContextTokens, estimateTokens, type ConversationMessage, type UserMessage } from './session.js';
+} from './model/ollama.js';
+import { parseCommand } from './commands/index.js';
+import { estimateContextTokens, estimateTokens, type ConversationMessage, type UserMessage } from './model/session.js';
 import { createLogger } from './logger.js';
+import { exportSession } from './commands/report.js';
+import { saveTestCase, loadTestCase } from './commands/cases.js';
 import { ChatPanel } from './ui/ChatPanel.js';
 import { InputLine } from './ui/InputLine.js';
 import { StatsBar } from './ui/StatsBar.js';
@@ -38,6 +40,12 @@ export default function App({ config }: AppProps) {
     [config],
   );
 
+  useEffect(() => {
+    return () => {
+      logger.close();
+    };
+  }, [logger]);
+
   const [model, setModel] = useState(config.model ?? '');
   const [temperature, setTemperature] = useState(config.temperature);
   const [systemPrompt, setSystemPrompt] = useState<string | null>(config.systemPrompt);
@@ -63,6 +71,7 @@ export default function App({ config }: AppProps) {
 
   const toolCallsRef = useRef<ToolCallInProgress[]>([]);
   const generatedTokensRef = useRef(0);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   const contextTokens = useMemo(
     () => estimateContextTokens(messages, systemPrompt, partial),
@@ -139,10 +148,13 @@ export default function App({ config }: AppProps) {
   const hasToolPrompt = pendingApproval !== null || hasFailedTool;
   const connectionError = !!error && error.includes('press Enter to retry');
 
-  // Global keys are ONLY active while a tool prompt or connection retry is pending,
-  // so normal typing/backspace always goes to the InputLine.
   useInput(
     (char, key) => {
+      if (key.escape && generating) {
+        cancelGeneration();
+        return;
+      }
+
       if (pendingApproval) {
         if (char === 'a') {
           approveToolCall(pendingApproval);
@@ -177,11 +189,41 @@ export default function App({ config }: AppProps) {
         testConnection();
       }
     },
-    { isActive: hasToolPrompt || connectionError },
+    { isActive: generating || hasToolPrompt || connectionError },
   );
+
+  function cancelGeneration() {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    setGenerating(false);
+    setPartial('');
+    setReasoning('');
+    setPendingApproval(null);
+    setStats((s) => ({ ...s, generationStart: null }));
+    addSystemMessage('Generation cancelled.');
+    logger.log({ event: 'generation_cancelled' });
+  }
 
   function addSystemMessage(content: string) {
     setMessages((prev) => [...prev, { role: 'system', content }]);
+  }
+
+  function buildPreview(toolName: string, args: Record<string, unknown>): string {
+    switch (toolName) {
+      case 'write_file': {
+        const filePath = args.path ?? '';
+        const content = String(args.content ?? '');
+        return `path: ${filePath}\ncontent:\n${content.length > 300 ? content.slice(0, 300) + '...' : content}`;
+      }
+      case 'run_shell':
+        return `$ ${args.command ?? ''}`;
+      case 'query_db':
+        return `db: ${args.path ?? ''}\n${args.query ?? ''}`;
+      default:
+        return JSON.stringify(args, null, 2);
+    }
   }
 
   // Tool approval handlers
@@ -212,21 +254,243 @@ export default function App({ config }: AppProps) {
   }
 
   function fixToolCall(activityId: string) {
-    // For now, just mark as skipped - in future could allow editing
-    skipToolCall(activityId);
-  }
-
-  function skipToolCall(activityId: string) {
+    const activity = toolActivities.find((a) => a.id === activityId);
+    if (!activity) return;
     setToolActivities((prev) =>
       prev.map((a) => (a.id === activityId ? { ...a, status: 'skipped' } : a)),
     );
+    logger.log({ event: 'tool_choice', tool: activity.toolName, args: activity.arguments, choice: 'fix' });
+    const errorMsg = activity.error ?? 'Tool call failed';
+    const toolMsg: ConversationMessage = {
+      role: 'tool',
+      tool_call_id: activity.toolCallId,
+      content: `Error: ${errorMsg}. Please try a different approach.`,
+    };
+    resumeGeneration([...messages, toolMsg]);
   }
 
-  function retryToolCall(activityId: string) {
-    // Re-run the tool call
+  function skipToolCall(activityId: string) {
     const activity = toolActivities.find((a) => a.id === activityId);
-    if (activity) {
-      executeToolActivity(activity);
+    if (!activity) return;
+    setToolActivities((prev) =>
+      prev.map((a) => (a.id === activityId ? { ...a, status: 'skipped' } : a)),
+    );
+    logger.log({ event: 'tool_choice', tool: activity.toolName, args: activity.arguments, choice: 'skip' });
+    const toolMsg: ConversationMessage = {
+      role: 'tool',
+      tool_call_id: activity.toolCallId,
+      content: 'Tool call skipped by user.',
+    };
+    resumeGeneration([...messages, toolMsg]);
+  }
+
+  async function retryToolCall(activityId: string) {
+    const activity = toolActivities.find((a) => a.id === activityId);
+    if (!activity) return;
+
+    const result = await executeToolActivity(activity);
+    const toolMsg: ConversationMessage = {
+      role: 'tool',
+      tool_call_id: activity.toolCallId,
+      content: result.error ? `Error: ${result.error}` : (result.output || ''),
+    };
+    logger.log({ event: 'tool_choice', tool: activity.toolName, args: activity.arguments, choice: 'retry' });
+    resumeGeneration([...messages, toolMsg]);
+  }
+
+  async function resumeGeneration(updatedHistory: ConversationMessage[]) {
+    setMessages(updatedHistory);
+    setGenerating(true);
+    setPartial('');
+    setReasoning('');
+    setPendingApproval(null);
+    setToolActivities([]);
+    toolCallsRef.current = [];
+    generatedTokensRef.current = 0;
+
+    const generationStart = Date.now();
+    setStats((s) => ({ ...s, generationStart, generatedTokens: 0 }));
+
+    let firstTokenTime: number | null = null;
+    const toolDefs = getToolDefinitions();
+    let history = updatedHistory;
+
+    try {
+      while (true) {
+        const abortController = new AbortController();
+        abortControllerRef.current = abortController;
+
+        const result = await streamCompletion(
+          client,
+          {
+            model,
+            messages: history,
+            temperature,
+            systemPrompt,
+            tools: toolDefs,
+          },
+          {
+            onContent(content) {
+              if (!firstTokenTime) firstTokenTime = Date.now();
+              setPartial(content);
+              const tokens = estimateTokens(content + reasoning);
+              generatedTokensRef.current = tokens;
+              setStats((s) => ({ ...s, generatedTokens: tokens }));
+            },
+            onReasoning(r) {
+              setReasoning(r);
+              const tokens = estimateTokens(partial + r);
+              generatedTokensRef.current = tokens;
+              setStats((s) => ({ ...s, generatedTokens: tokens }));
+            },
+            onToolCallDelta(tc) {
+              const idx = tc.index;
+              toolCallsRef.current[idx] = { ...(toolCallsRef.current[idx] ?? {}), ...tc } as ToolCallInProgress;
+            },
+            onUsage(usage) {
+              generatedTokensRef.current = usage.completionTokens;
+              setStats((s) => ({ ...s, generatedTokens: usage.completionTokens }));
+            },
+          },
+        );
+
+        abortControllerRef.current = null;
+
+        const assistantContent = result.content ?? partial;
+        const assistantMsg: ConversationMessage = {
+          role: 'assistant',
+          content: assistantContent,
+        };
+
+        if (result.toolCalls.length > 0) {
+          (assistantMsg as any).tool_calls = result.toolCalls.map((tc) => ({
+            id: tc.id || `call_${Date.now()}_${tc.index}`,
+            type: 'function' as const,
+            function: {
+              name: tc.function?.name || '',
+              arguments: tc.function?.arguments || '{}',
+            },
+          }));
+        }
+
+        history = [...history, assistantMsg];
+        setMessages(history);
+
+        logger.log({
+          event: 'assistant_message',
+          content: assistantContent,
+          reasoning: result.reasoning,
+          toolCalls: result.toolCalls,
+          generatedTokens: generatedTokensRef.current,
+        });
+
+        if (result.toolCalls.length === 0) {
+          break;
+        }
+
+        const newActivities: ToolActivity[] = [];
+
+        for (const tc of result.toolCalls) {
+          const callId = tc.id || `call_${Date.now()}_${tc.index}`;
+          const toolName = tc.function?.name || '';
+          let args: Record<string, unknown> = {};
+          try {
+            args = JSON.parse(tc.function?.arguments || '{}');
+          } catch {
+            args = {};
+          }
+
+          const validation = validateToolCall({
+            id: callId,
+            type: 'function',
+            function: { name: toolName, arguments: tc.function?.arguments || '{}' },
+          });
+
+          const activity: ToolActivity = {
+            id: `activity_${callId}`,
+            toolCallId: callId,
+            toolName,
+            arguments: args,
+            status: validation.valid ? 'awaiting_approval' : 'failed',
+            validationError: validation.error,
+            preview: buildPreview(toolName, args),
+          };
+
+          newActivities.push(activity);
+          logger.log({
+            event: 'tool_call',
+            tool: toolName,
+            args,
+            valid: validation.valid,
+            validationError: validation.error,
+          });
+        }
+
+        setToolActivities((prev) => [...prev, ...newActivities]);
+
+        for (const activity of newActivities) {
+          if (activity.status === 'failed') {
+            setStats((s) => ({ ...s, toolFail: s.toolFail + 1 }));
+            continue;
+          }
+
+          setPendingApproval(activity.id);
+          const approved = await new Promise<boolean>((resolve) => {
+            approvalResolvers.current.set(activity.id, resolve);
+          });
+
+          if (approved) {
+            const result = await executeToolActivity(activity);
+            const toolMsg: ConversationMessage = {
+              role: 'tool',
+              tool_call_id: activity.toolCallId,
+              content: result.error ? `Error: ${result.error}` : (result.output || ''),
+            };
+            history = [...history, toolMsg];
+            setMessages(history);
+          } else {
+            const toolMsg: ConversationMessage = {
+              role: 'tool',
+              tool_call_id: activity.toolCallId,
+              content: 'Tool call denied by user',
+            };
+            history = [...history, toolMsg];
+            setMessages(history);
+            logger.log({
+              event: 'tool_denied',
+              tool: activity.toolName,
+              args: activity.arguments,
+            });
+          }
+        }
+
+        setPartial('');
+        setReasoning('');
+        setGenerating(true);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (err instanceof Error && err.name === 'AbortError') {
+        return;
+      }
+      if (/404|not found/i.test(message)) {
+        setError(`Model "${model}" not found. Run: ollama pull ${model} — or switch with /model <name>.`);
+        logger.log({ event: 'model_not_found', model, error: message });
+      } else if (/connection|fetch failed|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|socket|network|timeout/i.test(message)) {
+        setConnected(false);
+        setError(`Connection lost. Check that Ollama is running at ${config.baseUrl}, then press Enter to retry.`);
+        logger.log({ event: 'connection_error', error: message });
+      } else {
+        setError(message);
+        logger.log({ event: 'generation_error', error: message });
+      }
+    } finally {
+      setGenerating(false);
+      setPartial('');
+      setReasoning('');
+      setPendingApproval(null);
+      setStats((s) => ({ ...s, generationStart: null }));
+      abortControllerRef.current = null;
     }
   }
 
@@ -241,6 +505,7 @@ export default function App({ config }: AppProps) {
     const toolCtx: ToolContext = {
       workspace: config.workspace,
       maxResultBytes: config.maxResultBytes,
+      shellTimeoutMs: config.shellTimeoutMs,
     };
 
     const result = await executeToolCall(
@@ -359,9 +624,65 @@ export default function App({ config }: AppProps) {
           logger.log({ event: 'list_models', models: models.map((m) => m.name) });
           break;
         }
-        case 'not-implemented':
-          addSystemMessage(`/${action.command} is not implemented yet.`);
+        case 'cancel':
+          if (generating) {
+            cancelGeneration();
+          } else {
+            addSystemMessage('Nothing to cancel.');
+          }
           break;
+        case 'stats': {
+          const lines = [
+            `Session statistics:`,
+            `  Messages: ${messages.length}`,
+            `  Generated tokens: ${stats.generatedTokens}`,
+            `  Context tokens: ~${contextTokens}`,
+            `  Tool successes: ${stats.toolSuccess}`,
+            `  Tool failures: ${stats.toolFail}`,
+            `  Model: ${model || '—'}`,
+            `  Temperature: ${temperature}`,
+            `  Session log: ${logger.path}`,
+          ];
+          addSystemMessage(lines.join('\n'));
+          logger.log({ event: 'stats_viewed', stats: { messages: messages.length, generatedTokens: stats.generatedTokens, contextTokens, toolSuccess: stats.toolSuccess, toolFail: stats.toolFail } });
+          break;
+        }
+        case 'export': {
+          try {
+            const report = await exportSession(config, messages, model, temperature, systemPrompt, stats);
+            addSystemMessage(`Report exported:\n  Markdown: ${report.mdPath}\n  JSON: ${report.jsonPath}`);
+            logger.log({ event: 'export', mdPath: report.mdPath, jsonPath: report.jsonPath });
+          } catch (err) {
+            addSystemMessage(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+          break;
+        }
+        case 'save': {
+          try {
+            const lastUser = [...messages].reverse().find((m) => m.role === 'user');
+            const promptToSave = lastUser && lastUser.role === 'user' ? lastUser.content : '';
+            await saveTestCase(config, action.name, promptToSave, systemPrompt);
+            addSystemMessage(`Test case "${action.name}" saved.`);
+            logger.log({ event: 'save', name: action.name });
+          } catch (err) {
+            addSystemMessage(`Save failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+          break;
+        }
+        case 'load': {
+          try {
+            const testCase = await loadTestCase(config, action.name);
+            if (testCase.systemPrompt) {
+              setSystemPrompt(testCase.systemPrompt);
+            }
+            setInput(testCase.prompt);
+            addSystemMessage(`Test case "${action.name}" loaded.`);
+            logger.log({ event: 'load', name: action.name });
+          } catch (err) {
+            addSystemMessage(`Load failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+          break;
+        }
         case 'error':
           addSystemMessage(action.message);
           break;
@@ -381,203 +702,19 @@ export default function App({ config }: AppProps) {
     setPartial('');
     setReasoning('');
     setError(null);
+    setToolActivities([]);
     toolCallsRef.current = [];
     generatedTokensRef.current = 0;
 
     const userMsg: UserMessage = { role: 'user', content: userContent };
-    let history: ConversationMessage[] = [...messages, userMsg];
+    const history: ConversationMessage[] = [...messages, userMsg];
     setMessages(history);
     logger.log({ event: 'user_message', content: userContent });
 
     const generationStart = Date.now();
     setStats((s) => ({ ...s, generationStart, generatedTokens: 0 }));
 
-    let firstTokenTime: number | null = null;
-    const toolDefs = getToolDefinitions();
-
-    try {
-      while (true) {
-        const result = await streamCompletion(
-          client,
-          {
-            model,
-            messages: history,
-            temperature,
-            systemPrompt,
-            tools: toolDefs,
-          },
-          {
-            onContent(content) {
-              if (!firstTokenTime) firstTokenTime = Date.now();
-              setPartial(content);
-              const tokens = estimateTokens(content + reasoning);
-              generatedTokensRef.current = tokens;
-              setStats((s) => ({ ...s, generatedTokens: tokens }));
-            },
-            onReasoning(r) {
-              setReasoning(r);
-              const tokens = estimateTokens(partial + r);
-              generatedTokensRef.current = tokens;
-              setStats((s) => ({ ...s, generatedTokens: tokens }));
-            },
-            onToolCallDelta(tc) {
-              const idx = tc.index;
-              toolCallsRef.current[idx] = { ...(toolCallsRef.current[idx] ?? {}), ...tc } as ToolCallInProgress;
-            },
-            onUsage(usage) {
-              generatedTokensRef.current = usage.completionTokens;
-              setStats((s) => ({ ...s, generatedTokens: usage.completionTokens }));
-            },
-          },
-        );
-
-        const assistantContent = result.content ?? partial;
-        
-        // Add assistant message to history
-        const assistantMsg: ConversationMessage = {
-          role: 'assistant',
-          content: assistantContent,
-        };
-        
-        // If there are tool calls, add them to the assistant message
-        if (result.toolCalls.length > 0) {
-          (assistantMsg as any).tool_calls = result.toolCalls.map((tc) => ({
-            id: tc.id || `call_${Date.now()}_${tc.index}`,
-            type: 'function' as const,
-            function: {
-              name: tc.function?.name || '',
-              arguments: tc.function?.arguments || '{}',
-            },
-          }));
-        }
-        
-        history = [...history, assistantMsg];
-        setMessages(history);
-        
-        logger.log({
-          event: 'assistant_message',
-          content: assistantContent,
-          reasoning: result.reasoning,
-          toolCalls: result.toolCalls,
-          generatedTokens: generatedTokensRef.current,
-        });
-
-        // If no tool calls, we're done
-        if (result.toolCalls.length === 0) {
-          break;
-        }
-
-        // Process tool calls
-        const newActivities: ToolActivity[] = [];
-        
-        for (const tc of result.toolCalls) {
-          const callId = tc.id || `call_${Date.now()}_${tc.index}`;
-          const toolName = tc.function?.name || '';
-          let args: Record<string, unknown> = {};
-          
-          try {
-            args = JSON.parse(tc.function?.arguments || '{}');
-          } catch {
-            args = {};
-          }
-
-          // Validate
-          const validation = validateToolCall({
-            id: callId,
-            type: 'function',
-            function: { name: toolName, arguments: tc.function?.arguments || '{}' },
-          });
-
-          const activity: ToolActivity = {
-            id: `activity_${callId}`,
-            toolCallId: callId,
-            toolName,
-            arguments: args,
-            status: validation.valid ? 'awaiting_approval' : 'failed',
-            validationError: validation.error,
-            preview: JSON.stringify(args, null, 2),
-          };
-
-          newActivities.push(activity);
-          logger.log({
-            event: 'tool_call',
-            tool: toolName,
-            args,
-            valid: validation.valid,
-            validationError: validation.error,
-          });
-        }
-
-        // Add all activities to state
-        setToolActivities((prev) => [...prev, ...newActivities]);
-
-        // Process each activity
-        for (const activity of newActivities) {
-          if (activity.status === 'failed') {
-            // Already failed validation
-            setStats((s) => ({ ...s, toolFail: s.toolFail + 1 }));
-            continue;
-          }
-
-          // Await approval
-          setPendingApproval(activity.id);
-          const approved = await new Promise<boolean>((resolve) => {
-            approvalResolvers.current.set(activity.id, resolve);
-          });
-
-          if (approved) {
-            const result = await executeToolActivity(activity);
-            
-            // Add tool result to history
-            const toolMsg: ConversationMessage = {
-              role: 'tool',
-              tool_call_id: activity.toolCallId,
-              content: result.error ? `Error: ${result.error}` : (result.output || ''),
-            };
-            history = [...history, toolMsg];
-            setMessages(history);
-          } else {
-            // Denied
-            const toolMsg: ConversationMessage = {
-              role: 'tool',
-              tool_call_id: activity.toolCallId,
-              content: 'Tool call denied by user',
-            };
-            history = [...history, toolMsg];
-            setMessages(history);
-            logger.log({
-              event: 'tool_denied',
-              tool: activity.toolName,
-              args: activity.arguments,
-            });
-          }
-        }
-
-        // Continue loop to get model's response after tool calls
-        setPartial('');
-        setReasoning('');
-        setGenerating(true);
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (/404|not found/i.test(message)) {
-        setError(`Model "${model}" not found. Run: ollama pull ${model} — or switch with /model <name>.`);
-        logger.log({ event: 'model_not_found', model, error: message });
-      } else if (/connection|fetch failed|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|socket|network|timeout/i.test(message)) {
-        setConnected(false);
-        setError(`Connection lost. Check that Ollama is running at ${config.baseUrl}, then press Enter to retry.`);
-        logger.log({ event: 'connection_error', error: message });
-      } else {
-        setError(message);
-        logger.log({ event: 'generation_error', error: message });
-      }
-    } finally {
-      setGenerating(false);
-      setPartial('');
-      setReasoning('');
-      setPendingApproval(null);
-      setStats((s) => ({ ...s, generationStart: null }));
-    }
+    await resumeGeneration(history);
   }
 
   return (
