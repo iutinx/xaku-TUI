@@ -2,7 +2,7 @@
 
 A living record of everything discussed and built for xaku, the terminal workspace for chatting with, stress-testing, and reviewing local Ollama models. Keep this file updated as phases complete.
 
-Last updated: 2026-10-24 (src/ reorganized into `commands/` and `model/` subfolders; 73 tests passing)
+Last updated: 2026-10-24 (Phase 9: safe /retry with in-flight tools, auto-approve modes + `t` hotkey, streaming markdown; 123 tests passing)
 
 ---
 
@@ -143,77 +143,229 @@ User feedback: *"the text format he is trying to apply does not work"* — model
 - **Tables**: monospace padding via `padEnd` per column — simple but readable.
 - **ChatPanel**: assistant messages now render through `<MarkdownText />`; user/system/tool messages stay plain.
 - **Tests**: added markdown tests (cleanLatex, isMathLike, highlightCode, splitSegmentsIntoLines, `<MarkdownText />` render via `ink-testing-library`) — **73 tests total, all passing**.
-- **Manual demo**: `scripts/md-demo.tsx` renders sample markdown (including the user's LaTeX report) for visual verification.
+
+### Phase 8.1 — Tool cancellation via AbortController
+
+**`ToolContext`**: added optional `abortSignal?: AbortSignal`.
+**`ToolResult`**: added optional `cancelled?: boolean` to distinguish user-cancelled from execution errors.
+**`ToolActivityStatus`**: added `'cancelled'` status.
+
+**Behavior in `src/tools/run_shell.ts`**:
+- If `abortSignal.aborted` on entry → return `{ cancelled: true }` immediately (no spawn)
+- Register `abort` listener → on fire: SIGTERM the process, SIGKILL after 1s grace
+- On `close` with cancelled flag set → return `{ error: 'Command cancelled', cancelled: true }`
+- Always remove abort listener on finish (no leaks)
+
+**Behavior in `src/tools/query_db.ts`**:
+- Check `abortSignal.aborted` at three points: before opening DB, after `prepare()`, and after `all()`
+- SQLite operations are synchronous so cancellation is only possible between phases, but covers the "already aborted" and "don't return huge results if cancelled mid-work" cases
+
+**Wiring in `src/app.tsx`**:
+- New `toolControllersRef: Map<string, AbortController>` tracks active tool executions keyed by `activityId`
+- `executeToolActivity()` creates a controller before calling `executeToolCall`, deletes on completion
+- `cancelGeneration()` now also: iterates the map, calls `.abort()` on each, and marks those activities as `'cancelled'`
+- `ToolPanel.tsx` renders `'cancelled'` state with `↓ cancelled by user` in warning color
+
+- **Tests**: 3 new (76 total, all passing):
+  - Long-running `sleep 5` command cancels within 2s when aborted at 100ms
+  - Already-aborted signal short-circuits both `run_shell` and `query_db` immediately
+  - **Manual demo**: `scripts/md-demo.tsx` renders sample markdown (including the user's LaTeX report) for visual verification.
+
+### Phase 8.2 — Spec §14 Acceptance Harness
+
+**Goal**: Automated and manual verification of all 7 spec §14 acceptance criteria.
+
+**New test files**:
+- `src/logger.test.ts` — 2 tests for crash-safe session logging (Check 4)
+- `src/commands/report.test.ts` — 3 tests for /export report structure and /stats consistency (Check 5)
+- `src/ui/theme.test.ts` — 5 tests for Unicode/plain symbol fallback (Check 7)
+
+**Theme.ts refactor**:
+- Exported `getSymbols()` and `isPlainMode()` functions for testability
+- `supportsUnicode()` now calls `isPlainMode()` to check `XAKU_PLAIN=1` and `TERM=dumb`
+- All 5 symbol fallback tests verify ASCII-safe output in plain mode
+
+**Acceptance harness** (`scripts/acceptance.ts`):
+- Runs all automated checks (Checks 2, 3, 4, 5, 7) via unit tests
+- Documents manual test procedures for Checks 1 and 6 (require Ollama)
+- Provides pass/fail summary with actionable next steps
+
+**Manual test documentation** (`MANUAL_TESTS.md`):
+- Step-by-step procedures for all 7 acceptance checks
+- Prerequisites (Ollama installation, model requirements)
+- Troubleshooting guide for common issues
+- Cross-platform path handling tests
+- Long-running tool execution tests
+- Session log integrity verification
+
+**Test results**: 10 new tests (86 total, all passing)
+- Check 2: Malformed tool calls labeled correctly ✅ (automated)
+- Check 3: Workspace boundary enforced ✅ (automated)
+- Check 4: Crash-safe logging with session_end ✅ (automated)
+- Check 5: /export matches /stats ✅ (automated)
+- Check 7: Symbol fallback works ✅ (automated)
+- Check 1: Tool call approval flow ⚠️ (manual, requires Ollama)
+- Check 6: Ollama disconnect handling ⚠️ (manual, requires Ollama)
+
+### Phase 8.3 — Windows Caution Pass
+
+**Goal**: Verify cross-platform path handling works correctly on Windows and document platform-specific considerations.
+
+**New test file**:
+- `src/tools/path.test.ts` — 10 tests for cross-platform path handling
+
+**Tests added**:
+1. Relative paths with forward slashes ✅
+2. Relative paths with backslashes (Windows-style) ✅
+3. Mixed separator handling ✅
+4. Workspace boundary enforcement (`..` escapes) ✅
+5. Absolute path blocking ✅
+6. Paths within workspace ✅
+7. Workspace root path ✅
+8. Case-insensitive paths ✅
+9. Drive letter paths (Windows-specific) ✅
+10. Long paths on Windows ✅
+
+**New documentation** (`WINDOWS.md`):
+- Installation guide for Windows
+- Platform-specific features (shell execution, path handling, symbol fallback)
+- Known issues and workarounds (process termination, file locking, path length, terminal rendering)
+- Manual testing procedures for Windows
+- Troubleshooting guide
+- Performance considerations
+- Windows-specific paths and configuration
+
+**Key findings**:
+- Existing `resolveWithinWorkspace` implementation already handles Windows paths correctly via Node.js `path` module
+- No code changes required — implementation was already cross-platform compatible
+- Documented platform-specific behaviors: process termination, file locking, path length limits
+
+**Test results**: 10 new tests (96 total, all passing)
+- All existing 86 tests still passing
+- Typecheck ✅
+- Build ✅
+
+**Documentation created**:
+- `WINDOWS.md` — comprehensive Windows platform guide
+- `docs/PHASE_8_3_SUMMARY.md` — phase summary and recommendations
+
+### Phase 9 — Immediate pending items: safe /retry, auto-approve, streaming markdown
+
+**1. `/retry` with in-flight tool calls (was unsafe)**:
+- Root cause: `/retry` called `generate()` without aborting the running stream/tools; a cancelled generation left its `resumeGeneration` loop either suspended forever on an unresolved approval promise (leak) or continuing to stream and overwrite the new turn's state (race). Also, cancel mid-approval left assistant messages with `tool_calls` that never received tool results — sending a new prompt after those violates the OpenAI-compatible API contract.
+- Fixes in `src/app.tsx`:
+  - New `cleanupGeneration()` extracted from `cancelGeneration()`: bumps a `generationEpochRef`, aborts stream + all tool controllers, resolves any pending approval promises with `false`, marks running activities `cancelled`, resets state. `cancelGeneration()` = `cleanupGeneration()` + "Generation cancelled." message.
+  - **Generation epoch guard**: every `resumeGeneration` loop captures `epoch = ++generationEpochRef.current` and bails at four checkpoints (top of while loop, after `streamCompletion` returns, after the approval promise, and the `finally` block only runs state resets if the epoch still matches). Stale loops can never clobber the current turn.
+  - `/retry` handler now calls `cleanupGeneration()` (silent — no "cancelled" message) before regenerating. Old assistant/tool turns are deliberately **kept in history as context**; the retry appends a fresh copy of the last user prompt.
+  - `fix`/`skip`/`retry` tool flows also call `cleanupGeneration()` first, so the still-streaming loop from the failed-turn continuation is invalidated rather than racing the resumed turn.
+- New `fillMissingToolResults()` in `src/model/session.ts` (pure, tested): scans the history for assistant messages whose `tool_calls` lack matching `role:'tool'` results and inserts synthetic `Tool call was cancelled before completing.` messages right after the assistant message. Applied in `generate()` and `resumeGeneration()` so dangling calls can never reach the API.
+
+**2. Auto-approve modes (spec §15)**:
+- `Config.autoApprove: 'none' | 'read-only' | 'all'` (default `none`), settable via `--auto-approve <mode>` flag or `XAKU_AUTO_APPROVE` env; invalid values fail fast at startup with a clear message.
+- Approval loop in `resumeGeneration()` checks `shouldAutoApprove(toolName)` before pausing: mode `all` approves everything, `read-only` uses the existing `ToolDefinition.isReadOnly` flag (`read_file`/`list_dir`/`query_db`). Auto-approved activities are marked `autoApproved` and logged as `tool_auto_approved` (with mode); manual flow unchanged.
+- Toggle methods:
+  - `/autoapprove [none|read-only|all]` slash command (alias `/auto`); bare `/autoapprove` reports the current mode.
+  - **`[t]` hotkey** cycles none → read-only → all → none whenever a generation is in flight (same gating as `a/d/f/s/r`, so normal typing never conflicts). If the currently pending tool is covered by the newly selected mode, it is approved immediately — press `t` once for read-only, twice to release a pending `write_file`.
+- UI: TopBar shows `· auto:read-only` (yellow) when active; ToolPanel renders `└ auto-approved` detail lines and the `[t] auto-approve` hint on pending prompts; input placeholder mentions the toggle.
+- Mode changes are logged as `set_auto_approve` events (with `via: command|hotkey`).
+
+**3. Streaming markdown**:
+- `partial` now renders through `<MarkdownText />` live instead of staying plain until completion.
+- `preprocessStreaming(text)` in `src/ui/MarkdownText.tsx` closes dangling constructs before lexing so the renderer never flickers on unclosed syntax: appends ` ``` ` when fence-opening lines are odd, closes unclosed inline code (`` ` ``), bold (`**`), strikethrough (`~~`) via odd-count detection (markers inside complete fenced/inline spans are ignored), and closes a trailing `[label](url` paren. Single `*`/`_` emphasis deliberately left alone (too ambiguous with bullets/words).
+- `ChatPanel` streaming block restructured: `AssistantBlock` no longer wraps children in `<Text>` (Box-in-Text is invalid in Ink); the cursor `▌` is appended to the markdown content so it stays inline with the last line instead of popping to a new row.
+- No debounce: `useMemo`-keyed re-lexing per content change is cheap at chat sizes and Ink diffs unchanged rows.
+
+**Incidental fix**: `scripts/smoke.ts` and `scripts/tool-test.ts` still imported the pre-Phase-8 `src/ollama.js` path — updated to `src/model/ollama.js`. Re-verified live against Ollama: full tool round trip passes.
+
+**Tests**: 27 new (123 total, all passing):
+- `src/model/session.test.ts` — 6 tests: `fillMissingToolResults` identity/repair/ordering/custom-filler.
+- `src/commands/commands.test.ts` — 5 new: `/autoapprove` modes, bare show, invalid mode, `/auto` alias, palette filtering.
+- `src/ui/markdown.test.ts` — 14 new: 12 `preprocessStreaming` cases + 2 `ChatPanel` streaming renders.
+- `src/tools/executor.test.ts` — 2 new: `isReadOnly` classification the auto-approve modes depend on.
+- Typecheck ✅, build ✅, `scripts/tool-test.ts` live round trip ✅.
 
 ## 5. Current State
 
-**Working & verified** (typecheck ✅, 73 tests ✅, PTY smoke ✅, real Ollama ✅ with qwen3:4b):
+**Working & verified** (typecheck ✅, 123 tests ✅, PTY smoke ✅, real Ollama ✅ with qwen3:4b, spec §14 harness ✅):
 - Fullscreen TUI: top bar, chat with live streaming + reasoning display, input with cursor/editing, stats bar pinned to the bottom.
 - Responsive resize: expand/widen/shrink repaints cleanly.
 - Streaming chat via Ollama; tok/s + context counters; connection status with retry.
 - No hardcoded default model: silent auto-select of first installed model, `XAKU_MODEL` env or `-m` override, warn+fallback only for explicit-missing.
 - Session logging (JSONL, crash-safe) with proper `session_end` on exit.
-- All five tools: `read_file`, `list_dir`, `write_file`, `run_shell`, `query_db` — with workspace boundary (path + realpath), approval flow, fix/skip/retry choices, and cancellation via `/cancel` or `Esc`.
-- All nine slash commands: `/model`, `/temperature`, `/system`, `/clear`, `/retry`, `/stats`, `/export`, `/save`, `/load`.
+- All five tools: `read_file`, `list_dir`, `write_file`, `run_shell`, `query_db` — with workspace boundary (path + realpath), approval flow, fix/skip/retry choices.
+- Cancellation: `/cancel` or `Esc` aborts in-flight generation AND running shell/database tools via per-tool `AbortController`.
+- All nine slash commands: `/model`, `/temperature`, `/system`, `/clear`, `/retry`, `/stats`, `/export`, `/save`, `/load` — plus `/autoapprove` (alias `/auto`) from Phase 9.
 - Command autocomplete palette with filtering, aliases, keyboard nav.
 - Tool error flow: `fix` feeds error back to model, `retry` re-executes and resumes, `skip` sends skip message — all logged.
 - Markdown rendering for assistant messages: headings, bold/italic, inline code, code blocks with syntax highlighting, lists, blockquotes, tables, links, images (as `[image: alt]`), strikethrough — plus LaTeX stripping with Unicode symbol substitution.
+- Source organized into `src/commands/`, `src/model/`, `src/tools/`, `src/ui/` subfolders with 4 top-level files.
+- Spec §14 acceptance harness: 5/7 checks automated, 2 require manual verification with Ollama (documented in `MANUAL_TESTS.md`).
+- Safe `/retry` / cancel / fix-skip-retry with in-flight tools: generation-epoch guard stops stale loops from clobbering state; dangling tool calls are auto-filled before any new request (old turns kept as context).
+- Auto-approve modes (`none` / `read-only` / `all`) via `--auto-approve`, `XAKU_AUTO_APPROVE`, `/autoapprove`, and the `[t]` hotkey; TopBar/ToolPanel indicators; all decisions logged.
+- Live streaming markdown: partial output renders through the markdown pipeline with `preprocessStreaming` closing unclosed fences/spans/emphasis.
 
 **Pending**:
-- `/retry` after tool turns with in-flight tool calls
-- Mid-session Ollama-kill banner test (spec §14)
-- Cross-platform: Windows path normalization + shell invocation testing, plain-symbol fallback (`XAKU_PLAIN=1` exists, untested on Windows terminals)
-- No way to cancel a running tool (only generation can be cancelled)
-- Optional auto-approve modes for trusted read-only tools (spec §15)
-- Streaming markdown: currently `partial` stays plain until the message completes (avoids flicker on unclosed syntax); could switch to live partial-markdown rendering with graceful degradation later
+- Windows manual verification (all 123 tests + install flow on a real Windows box; CI Windows runner recommended).
+- Cross-platform CI (GitHub Actions matrix: macOS/Windows/Linux).
 
 ## 6. Later (designed for, per spec §15)
 - Side-by-side model comparison (keep session/log model-agnostic).
-- Custom tool-call format checkers; more DB types; optional auto-approve for trusted read-only tools.
-- UI polish roadmap (agreed to defer until core is done): markdown rendering (biggest visual win, ~1h), syntax-highlighted code blocks, collapsible tool sections, diff views, scrollback.
+- Custom tool-call format checkers; more DB types.
+- UI polish roadmap (agreed to defer until core is done): collapsible tool sections, diff views, scrollback.
 
 ## 7. Reference: File Map
 
 ```
 src/
-  app.tsx              # state machine: chat loop, tool approvals, commands, hotkeys, cancellation
+  app.tsx              # state machine: chat loop, tool approvals, auto-approve modes, commands, hotkeys, cancellation, generation-epoch guard
   cli.tsx              # entry, alt-screen takeover, flags
-  config.ts            # flags/env/defaults → Config (workspace, limits, paths)
+  config.ts            # flags/env/defaults → Config (workspace, limits, paths, autoApprove)
   logger.ts            # JSONL session log
+  logger.test.ts       # 2 tests (spec §14 Check 4)
   commands/            # Slash command system
     index.ts           # Command registry + parser (previously src/commands.ts)
-    commands.test.ts   # 14 tests
+    commands.test.ts   # 19 tests
     cases.ts           # /save & /load test case persistence
     report.ts          # /export: Markdown + JSON report builder
+    report.test.ts     # 3 tests (spec §14 Check 5)
   model/               # Model connection layer
     ollama.ts          # Streaming client, model list, /api/show tool-support
-    session.ts         # Message types, token estimation
+    session.ts         # Message types, token estimation, fillMissingToolResults (dangling-call repair)
+    session.test.ts    # 6 tests
   tools/               # Tool engine
     types.ts           # ErrorLabel, ToolResult, ToolContext
     utils.ts           # resolveWithinWorkspace (path+realpath), trimOutput
-    registry.ts        # tool defs (read_file, list_dir, write_file, run_shell, query_db)
+    registry.ts        # tool defs (read_file, list_dir, write_file, run_shell, query_db) + isReadOnly flags
     read_file.ts       # + workspace boundary, trimming
     list_dir.ts
     write_file.ts      # + auto-create parent dirs
     run_shell.ts       # + timeout, output cap, cross-platform
     query_db.ts        # + better-sqlite3 read-only
     executor.ts        # validate / execute / getToolDefinitions
-    executor.test.ts   # 18 tests
+    executor.test.ts   # 23 tests
   ui/                  # UI components
     theme.ts           # listr2-style symbols + unicode/plain fallback
-    MarkdownText.tsx   # marked lexer → Ink renderers + cleanLatex
+    theme.test.ts      # 5 tests (spec §14 Check 7)
+    MarkdownText.tsx   # marked lexer → Ink renderers + cleanLatex + preprocessStreaming
     code-highlight.ts  # highlight.js → CodeSegment[] with scope→color map + line splitter
-    markdown.test.ts   # 41 tests
+    markdown.test.ts   # 55 tests
     TopBar.tsx  ChatPanel.tsx  InputLine.tsx  StatsBar.tsx
     CommandMenu.tsx  ToolPanel.tsx  ToolActivity.ts
 scripts/
   smoke.ts             # manual: chat round-trip
   tool-test.ts         # manual: model→validate→execute→feedback
   md-demo.tsx          # manual: render sample markdown/LaTeX through <MarkdownText/>
+  acceptance.ts        # spec §14 acceptance test harness (5 automated, 2 manual)
+MANUAL_TESTS.md        # step-by-step procedures for manual acceptance checks
 ```
 
 ## 8. Change Log (append new entries at top)
 
+- **2026-10-24 (later, 4)** — Phase 9: cleared the three long-standing pending items. (1) **Safe `/retry` / cancellation**: `cleanupGeneration()` extracted from `cancelGeneration()` — aborts stream + tools, resolves stuck approval promises, and bumps a `generationEpochRef` that every `resumeGeneration` loop checks at four points (loop top, after stream, after approval, guarded `finally`), so stale loops can no longer clobber a new turn or hang forever; `/retry` (and fix/skip/retry) clean up before regenerating, keeping old assistant/tool turns as context; new `fillMissingToolResults()` in `session.ts` repairs dangling `tool_calls` (assistant messages without matching tool results) before any request reaches the API. (2) **Auto-approve modes (spec §15)**: `Config.autoApprove` (`none`/`read-only`/`all`) via `--auto-approve` flag or `XAKU_AUTO_APPROVE` env; `/autoapprove` + `/auto` slash commands; **`[t]` hotkey** cycles modes during generation and immediately releases a pending tool that the new mode covers; leverages the existing `isReadOnly` tool flags; TopBar `auto:<mode>` indicator, ToolPanel `auto-approved` lines, `tool_auto_approved` / `set_auto_approve` log events. (3) **Streaming markdown**: live `partial` now renders through `<MarkdownText />` — `preprocessStreaming()` closes unclosed code fences, inline code, bold, strikethrough, and link parens (odd-count detection, markers inside complete spans ignored); cursor moved inline into the markdown so no pop-to-new-row; `AssistantBlock` fixed to not nest Box in Text. Incidental: `scripts/smoke.ts` + `scripts/tool-test.ts` imports repaired (stale pre-Phase-8 `src/ollama.js` path) and re-verified live end-to-end against Ollama. 27 new tests (123 total, all passing); typecheck ✅, build ✅.
+
+- **2026-10-24 (later, 3)** — Phase 8.3: Windows Caution Pass. Added `src/tools/path.test.ts` with 10 tests for cross-platform path handling (forward slashes, backslashes, mixed separators, workspace boundaries, absolute paths, case-insensitivity, drive letters, long paths). Created `WINDOWS.md` with comprehensive Windows platform guide: installation, platform-specific features, known issues (process termination, file locking, path length, terminal rendering), manual testing procedures, troubleshooting, performance considerations. Key finding: existing `resolveWithinWorkspace` already handles Windows paths correctly via Node.js `path` module — no code changes required. 10 new tests (96 total, all passing).
+- **2026-10-24 (later, 2)** — Phase 8.2: Spec §14 Acceptance Harness. Automated verification for 5/7 acceptance checks (Checks 2, 3, 4, 5, 7), with manual test procedures documented for Checks 1 and 6 (require Ollama). New test files: `src/logger.test.ts` (2 tests for crash-safe session logging), `src/commands/report.test.ts` (3 tests for /export structure and /stats consistency), `src/ui/theme.test.ts` (5 tests for Unicode/plain symbol fallback). Refactored `src/ui/theme.ts` to export `getSymbols()` and `isPlainMode()` for testability. Added `scripts/acceptance.ts` harness that runs automated checks and documents manual procedures. Created `MANUAL_TESTS.md` with step-by-step procedures for all 7 checks, troubleshooting guide, and cross-platform testing instructions. 10 new tests (86 total, all passing).
+- **2026-10-24 (later)** — Phase 8.1: Tool cancellation. Added optional `abortSignal` to `ToolContext` and `cancelled` flag to `ToolResult`. `run_shell` listens for the signal, SIGTERMs the child process, escalates to SIGKILL after 1s. `query_db` checks the signal at three points (before open, before/after `all()`). New `toolControllersRef` map in `app.tsx` tracks active controllers; `cancelGeneration()` now aborts them too and marks their activities `'cancelled'`. Added `'cancelled'` status to `ToolActivity` and rendering in `ToolPanel`. 3 new tests (76 total).
 - **2026-10-24** — Source reorganization. Root `src/` had 10 files; grouped into subfolders for clarity:
   - `src/commands/` — new folder containing `index.ts` (was `commands.ts`), `commands.test.ts`, `cases.ts`, `report.ts`
   - `src/model/` — new folder containing `ollama.ts` and `session.ts`
