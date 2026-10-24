@@ -1,4 +1,4 @@
-import { createClient, streamCompletion } from '../src/ollama.js';
+import { createClient, streamCompletion } from '../src/model/ollama.js';
 import { getToolDefinitions } from '../src/tools/executor.js';
 import { validateToolCall, executeToolCall } from '../src/tools/executor.js';
 import type { ToolContext } from '../src/tools/types.js';

@@ -1,4 +1,4 @@
-import { createClient, streamCompletion } from '../src/ollama.js';
+import { createClient, streamCompletion } from '../src/model/ollama.js';
 
 async function main() {
   const client = createClient('http://localhost:11434/v1');
