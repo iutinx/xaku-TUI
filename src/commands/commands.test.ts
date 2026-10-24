@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { COMMANDS, getFilteredCommands, parseCommand } from './commands.js';
+import { COMMANDS, getFilteredCommands, parseCommand } from './index.js';
 
 describe('getFilteredCommands', () => {
   it('returns all commands for an empty query', () => {
@@ -40,5 +40,35 @@ describe('parseCommand', () => {
   it('parses model switching', () => {
     const action = parseCommand('/model qwen3:4b');
     expect(action).toEqual({ type: 'set-model', model: 'qwen3:4b' });
+  });
+
+  it('parses /stats', () => {
+    expect(parseCommand('/stats')).toEqual({ type: 'stats' });
+  });
+
+  it('parses /export', () => {
+    expect(parseCommand('/export')).toEqual({ type: 'export' });
+  });
+
+  it('parses /save with name', () => {
+    expect(parseCommand('/save mytest')).toEqual({ type: 'save', name: 'mytest' });
+  });
+
+  it('rejects /save without name', () => {
+    const action = parseCommand('/save');
+    expect(action.type).toBe('error');
+  });
+
+  it('parses /load with name', () => {
+    expect(parseCommand('/load mytest')).toEqual({ type: 'load', name: 'mytest' });
+  });
+
+  it('rejects /load without name', () => {
+    const action = parseCommand('/load');
+    expect(action.type).toBe('error');
+  });
+
+  it('parses /cancel', () => {
+    expect(parseCommand('/cancel')).toEqual({ type: 'cancel' });
   });
 });

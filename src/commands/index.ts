@@ -66,7 +66,11 @@ export type CommandAction =
   | { type: 'set-temperature'; temperature: number }
   | { type: 'retry' }
   | { type: 'list-models' }
-  | { type: 'not-implemented'; command: string }
+  | { type: 'stats' }
+  | { type: 'export' }
+  | { type: 'save'; name: string }
+  | { type: 'load'; name: string }
+  | { type: 'cancel' }
   | { type: 'error'; message: string };
 
 export function parseCommand(input: string): CommandAction {
@@ -94,10 +98,17 @@ export function parseCommand(input: string): CommandAction {
     case 'retry':
       return { type: 'retry' };
     case 'stats':
+      return { type: 'stats' };
     case 'export':
+      return { type: 'export' };
     case 'save':
+      if (!args) return { type: 'error', message: 'Usage: /save <name>' };
+      return { type: 'save', name: args };
     case 'load':
-      return { type: 'not-implemented', command: name };
+      if (!args) return { type: 'error', message: 'Usage: /load <name>' };
+      return { type: 'load', name: args };
+    case 'cancel':
+      return { type: 'cancel' };
     default: {
       const known = COMMANDS.map((c) => c.name);
       const closest = known.find((c) => c.startsWith(name.toLowerCase()));
