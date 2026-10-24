@@ -1,6 +1,6 @@
 import { Box, Text, useInput } from 'ink';
 import { useEffect, useState } from 'react';
-import { getFilteredCommands, type CommandDef } from '../commands.js';
+import { getFilteredCommands, type CommandDef } from '../commands/index.js';
 import { CommandMenu } from './CommandMenu.js';
 import { symbols } from './theme.js';
 

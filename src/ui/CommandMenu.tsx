@@ -1,5 +1,5 @@
 import { Box, Text } from 'ink';
-import type { CommandDef } from '../commands.js';
+import type { CommandDef } from '../commands/index.js';
 
 export interface CommandMenuProps {
   commands: CommandDef[];
