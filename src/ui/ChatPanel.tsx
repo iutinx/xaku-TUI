@@ -1,7 +1,8 @@
 import { Box, Text } from 'ink';
 import React from 'react';
-import type { ConversationMessage } from '../session.js';
+import type { ConversationMessage } from '../model/session.js';
 import { symbols, theme } from './theme.js';
+import { MarkdownText } from './MarkdownText.js';
 
 export interface ChatPanelProps {
   messages: ConversationMessage[];
@@ -64,7 +65,7 @@ function MessageView({ message }: { message: ConversationMessage }) {
         <Text bold color={theme.text}>
           model
         </Text>
-        <Text>{message.content ?? ''}</Text>
+        <MarkdownText content={message.content ?? ''} />
       </Box>
     );
   }
