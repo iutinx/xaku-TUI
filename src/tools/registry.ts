@@ -3,6 +3,9 @@ import { zodToJsonSchema } from 'zod-to-json-schema';
 import type { ToolContext, ToolResult } from './types.js';
 import { list_dir } from './list_dir.js';
 import { read_file } from './read_file.js';
+import { write_file } from './write_file.js';
+import { run_shell } from './run_shell.js';
+import { query_db } from './query_db.js';
 
 export interface ToolDefinition {
   name: string;
@@ -15,6 +18,9 @@ export interface ToolDefinition {
 export const tools: Record<string, ToolDefinition> = {
   read_file,
   list_dir,
+  write_file,
+  run_shell,
+  query_db,
 };
 
 export function createToolSchemaJson(tool: ToolDefinition): Record<string, unknown> {

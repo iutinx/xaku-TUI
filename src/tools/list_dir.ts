@@ -1,7 +1,7 @@
 import { readdir } from 'node:fs/promises';
-import path from 'node:path';
 import { z } from 'zod';
 import type { ToolContext, ToolResult } from './types.js';
+import { resolveWithinWorkspace, trimOutput } from './utils.js';
 
 const schema = z.object({
   path: z.string().describe('Directory path to list (relative to workspace or absolute)'),
@@ -9,12 +9,8 @@ const schema = z.object({
 
 async function execute(args: unknown, ctx: ToolContext): Promise<ToolResult> {
   const { path: dirPath } = args as { path: string };
-  const resolved = path.resolve(ctx.workspace, dirPath);
-  
-  // Workspace boundary check
-  if (!resolved.startsWith(ctx.workspace + path.sep) && resolved !== ctx.workspace) {
-    return { error: 'Access denied: path outside workspace', label: 'blocked' };
-  }
+  const { resolved, error } = await resolveWithinWorkspace(dirPath, ctx);
+  if (error) return error;
 
   try {
     const entries = await readdir(resolved, { withFileTypes: true });
@@ -22,16 +18,8 @@ async function execute(args: unknown, ctx: ToolContext): Promise<ToolResult> {
       const type = entry.isDirectory() ? 'dir' : entry.isFile() ? 'file' : 'other';
       return `${type}\t${entry.name}`;
     });
-    
-    let output = lines.join('\n');
-    let trimmed = false;
-    
-    if (output.length > ctx.maxResultBytes) {
-      output = output.slice(0, ctx.maxResultBytes) + '\n[...truncated]';
-      trimmed = true;
-    }
-    
-    return { output, trimmed };
+
+    return trimOutput(lines.join('\n'), ctx.maxResultBytes);
   } catch (err) {
     if (err instanceof Error && 'code' in err && err.code === 'ENOENT') {
       return { error: 'Directory not found', label: 'execution_error' };

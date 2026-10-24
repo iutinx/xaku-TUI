@@ -9,6 +9,7 @@ export type ErrorLabel =
 export interface ToolContext {
   workspace: string;
   maxResultBytes: number;
+  shellTimeoutMs: number;
 }
 
 export interface ToolResult {
