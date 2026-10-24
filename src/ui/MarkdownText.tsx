@@ -10,6 +10,33 @@ export interface MarkdownTextProps {
 
 type AnyToken = { type: string; [key: string]: unknown };
 
+/**
+ * Make partially-streamed markdown safe to lex by closing dangling constructs:
+ * unclosed code fences, inline code, bold/strikethrough markers, and link
+ * parens. Applied only during streaming; complete messages render raw content.
+ */
+export function preprocessStreaming(text: string): string {
+  if (!text) return text;
+  let out = text;
+
+  // Odd number of fence-opening lines => last block is still open.
+  const fences = out.match(/^`{3,}[^\n]*/gm) ?? [];
+  if (fences.length % 2 === 1) {
+    out += '\n```';
+  }
+
+  // Strip complete fenced and inline code spans, then count dangling markers.
+  const outside = out.replace(/```[\s\S]*?```/g, '').replace(/`[^`\n]*`/g, '');
+  const count = (s: string, sub: string) => s.split(sub).length - 1;
+
+  if (count(outside, '`') % 2 === 1) out += '`';
+  if (count(outside, '**') % 2 === 1) out += '**';
+  if (count(outside, '~~') % 2 === 1) out += '~~';
+  if (/\]\([^)]*$/.test(out)) out += ')';
+
+  return out;
+}
+
 const latexCommandMap: Record<string, string> = {
   cdot: '·',
   cdots: '⋯',

@@ -2,7 +2,7 @@ import { Box, Text } from 'ink';
 import React from 'react';
 import type { ConversationMessage } from '../model/session.js';
 import { symbols, theme } from './theme.js';
-import { MarkdownText } from './MarkdownText.js';
+import { MarkdownText, preprocessStreaming } from './MarkdownText.js';
 
 export interface ChatPanelProps {
   messages: ConversationMessage[];
@@ -33,10 +33,7 @@ export function ChatPanel({ messages, partial, reasoning, generating, error }: C
               {reasoning}
             </Text>
           )}
-          {partial}
-          <Text backgroundColor="white" color="black">
-            {symbols.cursor}
-          </Text>
+          <MarkdownText content={preprocessStreaming(partial) + symbols.cursor} />
         </AssistantBlock>
       )}
       {error && (
@@ -91,7 +88,7 @@ function AssistantBlock({ children }: { children: React.ReactNode }) {
       <Text bold color={theme.text}>
         model
       </Text>
-      <Text>{children}</Text>
+      {children}
     </Box>
   );
 }

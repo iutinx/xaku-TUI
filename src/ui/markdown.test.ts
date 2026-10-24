@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { render } from 'ink-testing-library';
 import React from 'react';
-import { cleanLatex, isMathLike, MarkdownText } from './MarkdownText.js';
+import { cleanLatex, isMathLike, MarkdownText, preprocessStreaming } from './MarkdownText.js';
+import { ChatPanel } from './ChatPanel.js';
 import { highlightCode, splitSegmentsIntoLines } from './code-highlight.js';
 
 describe('cleanLatex', () => {
@@ -287,5 +288,92 @@ describe('<MarkdownText />', () => {
       React.createElement(MarkdownText, { content: '' }),
     );
     expect(lastFrame()).toBeDefined();
+  });
+});
+
+describe('preprocessStreaming', () => {
+  it('returns empty strings unchanged', () => {
+    expect(preprocessStreaming('')).toBe('');
+  });
+
+  it('closes an unclosed code fence', () => {
+    const out = preprocessStreaming('```python\nprint(1)');
+    expect(out.endsWith('\n```')).toBe(true);
+  });
+
+  it('leaves balanced fences alone', () => {
+    const text = '```python\nprint(1)\n```\n';
+    expect(preprocessStreaming(text)).toBe(text);
+  });
+
+  it('closes a dangling bold marker', () => {
+    expect(preprocessStreaming('this is **very imp')).toBe('this is **very imp**');
+  });
+
+  it('leaves balanced bold alone', () => {
+    const text = 'this is **fine** already';
+    expect(preprocessStreaming(text)).toBe(text);
+  });
+
+  it('closes a dangling inline code span', () => {
+    expect(preprocessStreaming('run `npm ci')).toBe('run `npm ci`');
+  });
+
+  it('closes a dangling strikethrough', () => {
+    expect(preprocessStreaming('was ~~old')).toBe('was ~~old~~');
+  });
+
+  it('closes a dangling link paren', () => {
+    expect(preprocessStreaming('see [docs](https://x.')).toBe('see [docs](https://x.)');
+  });
+
+  it('does not double-close a complete link', () => {
+    const text = 'see [docs](https://example.com)';
+    expect(preprocessStreaming(text)).toBe(text);
+  });
+
+  it('ignores markers inside fenced code blocks', () => {
+    const text = '```\n**bold**\n```';
+    expect(preprocessStreaming(text)).toBe(text);
+  });
+
+  it('ignores markers inside inline code spans', () => {
+    const text = 'literal `**` and more **real';
+    expect(preprocessStreaming(text)).toBe('literal `**` and more **real**');
+  });
+
+  it('handles a partial heading followed by dangling bold', () => {
+    expect(preprocessStreaming('**important** stuff and **othe')).toBe('**important** stuff and **othe**');
+  });
+});
+
+describe('ChatPanel streaming render', () => {
+  it('renders in-flight partial content as markdown', () => {
+    const { lastFrame } = render(
+      React.createElement(ChatPanel, {
+        messages: [],
+        partial: '**bold text',
+        reasoning: '',
+        generating: true,
+        error: null,
+      }),
+    );
+    const out = lastFrame() ?? '';
+    expect(out).toContain('bold text');
+    expect(out).not.toContain('**');
+  });
+
+  it('renders an open code block as a fenced block while streaming', () => {
+    const { lastFrame } = render(
+      React.createElement(ChatPanel, {
+        messages: [],
+        partial: '```js\nconst x = 1',
+        reasoning: '',
+        generating: true,
+        error: null,
+      }),
+    );
+    const out = lastFrame() ?? '';
+    expect(out).toContain('const x = 1');
   });
 });
