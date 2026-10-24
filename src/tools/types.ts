@@ -10,6 +10,7 @@ export interface ToolContext {
   workspace: string;
   maxResultBytes: number;
   shellTimeoutMs: number;
+  abortSignal?: AbortSignal;
 }
 
 export interface ToolResult {
@@ -17,6 +18,7 @@ export interface ToolResult {
   error?: string;
   label?: ErrorLabel;
   trimmed?: boolean;
+  cancelled?: boolean;
 }
 
 export interface ToolCall {

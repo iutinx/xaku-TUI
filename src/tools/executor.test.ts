@@ -4,6 +4,7 @@ import path from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
 import { executeToolCall, validateToolCall } from './executor.js';
+import { tools } from './registry.js';
 import type { ToolCall, ToolContext } from './types.js';
 
 describe('Tool Engine', () => {
@@ -283,5 +284,70 @@ describe('Tool Engine', () => {
       const result = await executeToolCall(call, ctx);
       expect(result.label).toBe('execution_error');
     });
+  });
+
+  describe('cancellation', () => {
+    it('cancels a running run_shell command', async () => {
+      const controller = new AbortController();
+      const call: ToolCall = {
+        id: '1',
+        type: 'function',
+        function: {
+          name: 'run_shell',
+          arguments: JSON.stringify({ command: 'sleep 5' }),
+        },
+      };
+      const promise = executeToolCall(call, { ...ctx, abortSignal: controller.signal });
+      setTimeout(() => controller.abort(), 100);
+      const start = Date.now();
+      const result = await promise;
+      expect(result.cancelled).toBe(true);
+      expect(result.label).toBe('execution_error');
+      expect(result.error).toContain('cancelled');
+      expect(Date.now() - start).toBeLessThan(2000);
+    });
+
+    it('returns cancelled immediately if signal already aborted for run_shell', async () => {
+      const controller = new AbortController();
+      controller.abort();
+      const call: ToolCall = {
+        id: '1',
+        type: 'function',
+        function: {
+          name: 'run_shell',
+          arguments: JSON.stringify({ command: 'echo hello' }),
+        },
+      };
+      const result = await executeToolCall(call, { ...ctx, abortSignal: controller.signal });
+      expect(result.cancelled).toBe(true);
+    });
+
+    it('returns cancelled immediately if signal already aborted for query_db', async () => {
+      const controller = new AbortController();
+      controller.abort();
+      const call: ToolCall = {
+        id: '1',
+        type: 'function',
+        function: {
+          name: 'query_db',
+          arguments: JSON.stringify({ path: 'test.db', query: 'SELECT * FROM users' }),
+        },
+      };
+      const result = await executeToolCall(call, { ...ctx, abortSignal: controller.signal });
+      expect(result.cancelled).toBe(true);
+    });
+  });
+});
+
+describe('auto-approve tool classification', () => {
+  it('read-only tools are marked isReadOnly', () => {
+    expect(tools.read_file.isReadOnly).toBe(true);
+    expect(tools.list_dir.isReadOnly).toBe(true);
+    expect(tools.query_db.isReadOnly).toBe(true);
+  });
+
+  it('mutating tools are not marked isReadOnly', () => {
+    expect(tools.write_file.isReadOnly).toBe(false);
+    expect(tools.run_shell.isReadOnly).toBe(false);
   });
 });

@@ -10,6 +10,10 @@ const schema = z.object({
 async function execute(args: unknown, ctx: ToolContext): Promise<ToolResult> {
   const { command } = args as { command: string };
 
+  if (ctx.abortSignal?.aborted) {
+    return { error: 'Command cancelled before start', label: 'execution_error', cancelled: true };
+  }
+
   return new Promise<ToolResult>((resolve) => {
     const isWindows = process.platform === 'win32';
     const shell = isWindows ? 'cmd.exe' : '/bin/sh';
@@ -23,11 +27,32 @@ async function execute(args: unknown, ctx: ToolContext): Promise<ToolResult> {
 
     let stdout = '';
     let stderr = '';
-    let killed = false;
+    let killedByTimeout = false;
+    let cancelled = false;
     let resolved = false;
 
+    const finish = (result: ToolResult) => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timer);
+      if (ctx.abortSignal) ctx.abortSignal.removeEventListener('abort', onAbort);
+      resolve(result);
+    };
+
+    const onAbort = () => {
+      cancelled = true;
+      proc.kill('SIGTERM');
+      setTimeout(() => {
+        if (!proc.killed) proc.kill('SIGKILL');
+      }, 1000);
+    };
+
+    if (ctx.abortSignal) {
+      ctx.abortSignal.addEventListener('abort', onAbort, { once: true });
+    }
+
     const timer = setTimeout(() => {
-      killed = true;
+      killedByTimeout = true;
       proc.kill('SIGTERM');
       setTimeout(() => {
         if (!proc.killed) proc.kill('SIGKILL');
@@ -49,20 +74,17 @@ async function execute(args: unknown, ctx: ToolContext): Promise<ToolResult> {
     });
 
     proc.on('error', (err) => {
-      if (!resolved) {
-        resolved = true;
-        clearTimeout(timer);
-        resolve({ error: err.message, label: 'execution_error' });
-      }
+      finish({ error: err.message, label: 'execution_error' });
     });
 
     proc.on('close', (code) => {
-      if (resolved) return;
-      resolved = true;
-      clearTimeout(timer);
+      if (cancelled) {
+        finish({ error: 'Command cancelled', label: 'execution_error', cancelled: true });
+        return;
+      }
 
-      if (killed) {
-        resolve({
+      if (killedByTimeout) {
+        finish({
           error: `Command timed out after ${ctx.shellTimeoutMs / 1000}s`,
           label: 'execution_error',
         });
@@ -77,7 +99,7 @@ async function execute(args: unknown, ctx: ToolContext): Promise<ToolResult> {
         .join('\n');
 
       if (code !== 0 && !combined) {
-        resolve({
+        finish({
           error: `Command exited with code ${code}`,
           label: 'execution_error',
         });
@@ -85,7 +107,7 @@ async function execute(args: unknown, ctx: ToolContext): Promise<ToolResult> {
       }
 
       const { output, trimmed } = trimOutput(combined || `Exit code: ${code}`, ctx.maxResultBytes);
-      resolve({ output, trimmed });
+      finish({ output, trimmed });
     });
   });
 }

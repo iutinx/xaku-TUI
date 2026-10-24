@@ -37,6 +37,37 @@ export function toOpenAIMessages(messages: ConversationMessage[]): ChatCompletio
   return messages as ChatCompletionMessageParam[];
 }
 
+/**
+ * Append synthetic tool results for any assistant tool_call that never received one
+ * (e.g. cancelled mid-approval). OpenAI-compatible APIs reject requests where an
+ * assistant message with tool_calls is not followed by a tool result per call,
+ * so histories with dangling calls must be repaired before sending a new prompt.
+ */
+export function fillMissingToolResults(
+  messages: ConversationMessage[],
+  content = 'Tool call was cancelled before completing.',
+): ConversationMessage[] {
+  const resolved = new Set<string>();
+  for (const m of messages) {
+    if (m.role === 'tool') resolved.add(m.tool_call_id);
+  }
+  const out: ConversationMessage[] = [];
+  let changed = false;
+  for (const m of messages) {
+    out.push(m);
+    if (m.role === 'assistant' && m.tool_calls) {
+      for (const tc of m.tool_calls) {
+        if (!resolved.has(tc.id)) {
+          out.push({ role: 'tool', tool_call_id: tc.id, content });
+          resolved.add(tc.id);
+          changed = true;
+        }
+      }
+    }
+  }
+  return changed ? out : messages;
+}
+
 export function estimateTokens(text: string): number {
   // Very rough estimate: ~4 characters per token for English/ASCII-heavy text.
   return Math.ceil(text.length / 4);

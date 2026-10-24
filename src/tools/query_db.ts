@@ -10,6 +10,11 @@ const schema = z.object({
 
 async function execute(args: unknown, ctx: ToolContext): Promise<ToolResult> {
   const { path: dbPath, query } = args as { path: string; query: string };
+
+  if (ctx.abortSignal?.aborted) {
+    return { error: 'Query cancelled', label: 'execution_error', cancelled: true };
+  }
+
   const { resolved, error } = await resolveWithinWorkspace(dbPath, ctx);
   if (error) return error;
 
@@ -28,8 +33,14 @@ async function execute(args: unknown, ctx: ToolContext): Promise<ToolResult> {
   }
 
   try {
+    if (ctx.abortSignal?.aborted) {
+      return { error: 'Query cancelled', label: 'execution_error', cancelled: true };
+    }
     const stmt = db.prepare(query);
     const results = stmt.all();
+    if (ctx.abortSignal?.aborted) {
+      return { error: 'Query cancelled', label: 'execution_error', cancelled: true };
+    }
     const json = JSON.stringify(results, null, 2);
     return trimOutput(json, ctx.maxResultBytes);
   } catch (err) {
