@@ -9,9 +9,14 @@ export interface Symbols {
   cursor: string;
 }
 
+export function isPlainMode(): boolean {
+  if (process.env.XAKU_PLAIN === '1') return true;
+  if (process.env.TERM === 'dumb') return true;
+  return false;
+}
+
 function supportsUnicode(): boolean {
-  if (process.env.XAKU_PLAIN === '1') return false;
-  if (process.env.TERM === 'dumb') return false;
+  if (isPlainMode()) return false;
   // Most modern terminals (including Windows Terminal) support Unicode box-drawing.
   return true;
 }
@@ -38,7 +43,11 @@ const plainSymbols: Symbols = {
   cursor: '|',
 };
 
-export const symbols = supportsUnicode() ? unicodeSymbols : plainSymbols;
+export function getSymbols(): Symbols {
+  return supportsUnicode() ? unicodeSymbols : plainSymbols;
+}
+
+export const symbols = getSymbols();
 
 export const theme = {
   primary: 'cyan',
