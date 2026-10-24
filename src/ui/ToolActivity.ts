@@ -6,7 +6,8 @@ export type ToolActivityStatus =
   | 'success'
   | 'failed'
   | 'denied'
-  | 'skipped';
+  | 'skipped'
+  | 'cancelled';
 
 export interface ToolActivity {
   id: string;
@@ -22,4 +23,5 @@ export interface ToolActivity {
   duration?: number;
   trimmed?: boolean;
   startTime?: number;
+  autoApproved?: boolean;
 }

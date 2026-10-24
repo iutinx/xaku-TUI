@@ -1,6 +1,7 @@
 import { Box, useInput, useStdout } from 'ink';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { Config } from './config.js';
+import type { Config, AutoApproveMode } from './config.js';
+import { AUTO_APPROVE_MODES } from './config.js';
 import {
   checkToolSupport,
   createClient,
@@ -9,7 +10,7 @@ import {
   type ToolCallInProgress,
 } from './model/ollama.js';
 import { parseCommand } from './commands/index.js';
-import { estimateContextTokens, estimateTokens, type ConversationMessage, type UserMessage } from './model/session.js';
+import { estimateContextTokens, estimateTokens, fillMissingToolResults, type ConversationMessage, type UserMessage } from './model/session.js';
 import { createLogger } from './logger.js';
 import { exportSession } from './commands/report.js';
 import { saveTestCase, loadTestCase } from './commands/cases.js';
@@ -20,6 +21,7 @@ import { TopBar } from './ui/TopBar.js';
 import { ToolPanel } from './ui/ToolPanel.js';
 import type { ToolActivity } from './ui/ToolActivity.js';
 import { validateToolCall, executeToolCall, getToolDefinitions } from './tools/executor.js';
+import { tools } from './tools/registry.js';
 import type { ToolContext } from './tools/types.js';
 
 export interface AppProps {
@@ -68,10 +70,29 @@ export default function App({ config }: AppProps) {
 
   const [toolActivities, setToolActivities] = useState<ToolActivity[]>([]);
   const [pendingApproval, setPendingApproval] = useState<string | null>(null); // activity id awaiting approval
+  const [autoApprove, setAutoApproveState] = useState<AutoApproveMode>(config.autoApprove);
+  const autoApproveRef = useRef<AutoApproveMode>(config.autoApprove);
+
+  function setAutoApprove(mode: AutoApproveMode) {
+    autoApproveRef.current = mode;
+    setAutoApproveState(mode);
+  }
+
+  function shouldAutoApprove(toolName: string): boolean {
+    const mode = autoApproveRef.current;
+    if (mode === 'all') return true;
+    if (mode === 'read-only') return tools[toolName]?.isReadOnly === true;
+    return false;
+  }
 
   const toolCallsRef = useRef<ToolCallInProgress[]>([]);
   const generatedTokensRef = useRef(0);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const toolControllersRef = useRef<Map<string, AbortController>>(new Map());
+  // Incremented on every new generation/cleanup so stale resumeGeneration loops
+  // can detect they were superseded (by cancel, retry, or fix/skip/retry) and stop
+  // before mutating shared state.
+  const generationEpochRef = useRef(0);
 
   const contextTokens = useMemo(
     () => estimateContextTokens(messages, systemPrompt, partial),
@@ -155,6 +176,11 @@ export default function App({ config }: AppProps) {
         return;
       }
 
+      if (char === 't' && generating) {
+        cycleAutoApprove();
+        return;
+      }
+
       if (pendingApproval) {
         if (char === 'a') {
           approveToolCall(pendingApproval);
@@ -192,18 +218,42 @@ export default function App({ config }: AppProps) {
     { isActive: generating || hasToolPrompt || connectionError },
   );
 
-  function cancelGeneration() {
+  function cleanupGeneration(): number {
+    generationEpochRef.current += 1;
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
+    const runningActivities = [...toolControllersRef.current.keys()];
+    for (const controller of toolControllersRef.current.values()) {
+      controller.abort();
+    }
+    toolControllersRef.current.clear();
+    if (runningActivities.length > 0) {
+      setToolActivities((prev) =>
+        prev.map((a) =>
+          runningActivities.includes(a.id) ? { ...a, status: 'cancelled' } : a,
+        ),
+      );
+    }
+    // Wake any loop suspended on the approval promise; its epoch check makes it
+    // exit without touching the new generation's state.
+    for (const resolve of approvalResolvers.current.values()) {
+      resolve(false);
+    }
+    approvalResolvers.current.clear();
     setGenerating(false);
     setPartial('');
     setReasoning('');
     setPendingApproval(null);
     setStats((s) => ({ ...s, generationStart: null }));
+    return runningActivities.length;
+  }
+
+  function cancelGeneration() {
+    const cancelledTools = cleanupGeneration();
     addSystemMessage('Generation cancelled.');
-    logger.log({ event: 'generation_cancelled' });
+    logger.log({ event: 'generation_cancelled', cancelledTools });
   }
 
   function addSystemMessage(content: string) {
@@ -253,9 +303,29 @@ export default function App({ config }: AppProps) {
     );
   }
 
+  function applyAutoApprove(mode: AutoApproveMode, via: 'command' | 'hotkey') {
+    setAutoApprove(mode);
+    logger.log({ event: 'set_auto_approve', mode, via });
+    // If the currently pending tool is covered by the new mode, approve it now.
+    if (pendingApproval) {
+      const activity = toolActivities.find((a) => a.id === pendingApproval);
+      if (activity && (mode === 'all' || (mode === 'read-only' && tools[activity.toolName]?.isReadOnly))) {
+        approveToolCall(pendingApproval);
+      }
+    }
+  }
+
+  function cycleAutoApprove() {
+    const idx = AUTO_APPROVE_MODES.indexOf(autoApproveRef.current);
+    const next = AUTO_APPROVE_MODES[(idx + 1) % AUTO_APPROVE_MODES.length];
+    addSystemMessage(`Auto-approve: ${next}.`);
+    applyAutoApprove(next, 'hotkey');
+  }
+
   function fixToolCall(activityId: string) {
     const activity = toolActivities.find((a) => a.id === activityId);
     if (!activity) return;
+    cleanupGeneration();
     setToolActivities((prev) =>
       prev.map((a) => (a.id === activityId ? { ...a, status: 'skipped' } : a)),
     );
@@ -272,6 +342,7 @@ export default function App({ config }: AppProps) {
   function skipToolCall(activityId: string) {
     const activity = toolActivities.find((a) => a.id === activityId);
     if (!activity) return;
+    cleanupGeneration();
     setToolActivities((prev) =>
       prev.map((a) => (a.id === activityId ? { ...a, status: 'skipped' } : a)),
     );
@@ -287,6 +358,7 @@ export default function App({ config }: AppProps) {
   async function retryToolCall(activityId: string) {
     const activity = toolActivities.find((a) => a.id === activityId);
     if (!activity) return;
+    cleanupGeneration();
 
     const result = await executeToolActivity(activity);
     const toolMsg: ConversationMessage = {
@@ -299,7 +371,9 @@ export default function App({ config }: AppProps) {
   }
 
   async function resumeGeneration(updatedHistory: ConversationMessage[]) {
-    setMessages(updatedHistory);
+    const epoch = ++generationEpochRef.current;
+    const repairedHistory = fillMissingToolResults(updatedHistory);
+    setMessages(repairedHistory);
     setGenerating(true);
     setPartial('');
     setReasoning('');
@@ -313,10 +387,11 @@ export default function App({ config }: AppProps) {
 
     let firstTokenTime: number | null = null;
     const toolDefs = getToolDefinitions();
-    let history = updatedHistory;
+    let history = repairedHistory;
 
     try {
       while (true) {
+        if (generationEpochRef.current !== epoch) return;
         const abortController = new AbortController();
         abortControllerRef.current = abortController;
 
@@ -355,6 +430,7 @@ export default function App({ config }: AppProps) {
         );
 
         abortControllerRef.current = null;
+        if (generationEpochRef.current !== epoch) return;
 
         const assistantContent = result.content ?? partial;
         const assistantMsg: ConversationMessage = {
@@ -434,10 +510,27 @@ export default function App({ config }: AppProps) {
             continue;
           }
 
-          setPendingApproval(activity.id);
-          const approved = await new Promise<boolean>((resolve) => {
-            approvalResolvers.current.set(activity.id, resolve);
-          });
+          let approved: boolean;
+          if (shouldAutoApprove(activity.toolName)) {
+            approved = true;
+            setToolActivities((prev) =>
+              prev.map((a) =>
+                a.id === activity.id ? { ...a, status: 'approved', autoApproved: true } : a,
+              ),
+            );
+            logger.log({
+              event: 'tool_auto_approved',
+              tool: activity.toolName,
+              args: activity.arguments,
+              mode: autoApproveRef.current,
+            });
+          } else {
+            setPendingApproval(activity.id);
+            approved = await new Promise<boolean>((resolve) => {
+              approvalResolvers.current.set(activity.id, resolve);
+            });
+            if (generationEpochRef.current !== epoch) return;
+          }
 
           if (approved) {
             const result = await executeToolActivity(activity);
@@ -485,12 +578,14 @@ export default function App({ config }: AppProps) {
         logger.log({ event: 'generation_error', error: message });
       }
     } finally {
-      setGenerating(false);
-      setPartial('');
-      setReasoning('');
-      setPendingApproval(null);
-      setStats((s) => ({ ...s, generationStart: null }));
-      abortControllerRef.current = null;
+      if (generationEpochRef.current === epoch) {
+        setGenerating(false);
+        setPartial('');
+        setReasoning('');
+        setPendingApproval(null);
+        setStats((s) => ({ ...s, generationStart: null }));
+        abortControllerRef.current = null;
+      }
     }
   }
 
@@ -502,10 +597,14 @@ export default function App({ config }: AppProps) {
       prev.map((a) => (a.id === activity.id ? { ...a, status: 'running', startTime } : a)),
     );
 
+    const controller = new AbortController();
+    toolControllersRef.current.set(activity.id, controller);
+
     const toolCtx: ToolContext = {
       workspace: config.workspace,
       maxResultBytes: config.maxResultBytes,
       shellTimeoutMs: config.shellTimeoutMs,
+      abortSignal: controller.signal,
     };
 
     const result = await executeToolCall(
@@ -520,7 +619,26 @@ export default function App({ config }: AppProps) {
       toolCtx,
     );
 
+    toolControllersRef.current.delete(activity.id);
+
     const duration = (Date.now() - startTime) / 1000;
+
+    if (result.cancelled) {
+      setToolActivities((prev) =>
+        prev.map((a) =>
+          a.id === activity.id
+            ? { ...a, status: 'cancelled', error: result.error, errorLabel: result.label, duration }
+            : a,
+        ),
+      );
+      logger.log({
+        event: 'tool_cancelled',
+        tool: activity.toolName,
+        args: activity.arguments,
+        duration,
+      });
+      return result;
+    }
 
     if (result.error) {
       setToolActivities((prev) =>
@@ -606,6 +724,7 @@ export default function App({ config }: AppProps) {
         case 'retry': {
           const lastUser = [...messages].reverse().find((m) => m.role === 'user');
           if (lastUser && lastUser.role === 'user') {
+            cleanupGeneration();
             logger.log({ event: 'retry', content: lastUser.content });
             generate(lastUser.content);
           } else {
@@ -613,6 +732,17 @@ export default function App({ config }: AppProps) {
           }
           break;
         }
+        case 'set-autoapprove':
+          applyAutoApprove(action.mode, 'command');
+          addSystemMessage(
+            action.mode === 'none'
+              ? 'Auto-approve disabled: every tool call asks for approval.'
+              : `Auto-approve enabled: ${action.mode}.`,
+          );
+          break;
+        case 'show-autoapprove':
+          addSystemMessage(`Auto-approve is "${autoApprove}". Usage: /autoapprove <none|read-only|all>`);
+          break;
         case 'list-models': {
           const models = await testConnection();
           if (models.length === 0) {
@@ -707,7 +837,7 @@ export default function App({ config }: AppProps) {
     generatedTokensRef.current = 0;
 
     const userMsg: UserMessage = { role: 'user', content: userContent };
-    const history: ConversationMessage[] = [...messages, userMsg];
+    const history: ConversationMessage[] = [...fillMissingToolResults(messages), userMsg];
     setMessages(history);
     logger.log({ event: 'user_message', content: userContent });
 
@@ -719,7 +849,12 @@ export default function App({ config }: AppProps) {
 
   return (
     <Box flexDirection="column" height={termRows} overflow="hidden">
-      <TopBar model={model || '—'} temperature={temperature} systemPrompt={systemPrompt} />
+      <TopBar
+        model={model || '—'}
+        temperature={temperature}
+        systemPrompt={systemPrompt}
+        autoApprove={autoApprove}
+      />
       <Box flexDirection="row" flexGrow={1} overflow="hidden">
         <Box flexGrow={toolActivities.length > 0 ? 1 : 1} flexDirection="column">
           <ChatPanel messages={messages} partial={partial} reasoning={reasoning} generating={generating} error={error} />
@@ -739,7 +874,7 @@ export default function App({ config }: AppProps) {
           connectionError
             ? 'Ollama unreachable — press Enter to retry'
             : pendingApproval
-              ? 'Press [a] approve or [d] deny'
+              ? 'Press [a] approve, [d] deny, or [t] cycle auto-approve'
               : hasFailedTool
                 ? 'Press [f] fix, [s] skip, or [r] retry'
                 : generating

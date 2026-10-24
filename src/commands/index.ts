@@ -1,3 +1,5 @@
+import { AUTO_APPROVE_MODES, isAutoApproveMode, type AutoApproveMode } from '../config.js';
+
 export interface CommandDef {
   name: string;
   description: string;
@@ -29,6 +31,12 @@ export const COMMANDS: CommandDef[] = [
   {
     name: 'retry',
     description: 'Re-send the last prompt with current settings',
+  },
+  {
+    name: 'autoapprove',
+    description: 'Auto-approve trusted tools without prompting',
+    hint: '<none|read-only|all>',
+    aliases: ['auto'],
   },
   {
     name: 'stats',
@@ -66,6 +74,8 @@ export type CommandAction =
   | { type: 'set-temperature'; temperature: number }
   | { type: 'retry' }
   | { type: 'list-models' }
+  | { type: 'set-autoapprove'; mode: AutoApproveMode }
+  | { type: 'show-autoapprove' }
   | { type: 'stats' }
   | { type: 'export' }
   | { type: 'save'; name: string }
@@ -97,6 +107,18 @@ export function parseCommand(input: string): CommandAction {
     }
     case 'retry':
       return { type: 'retry' };
+    case 'autoapprove':
+    case 'auto': {
+      if (!args) return { type: 'show-autoapprove' };
+      const mode = args.toLowerCase();
+      if (!isAutoApproveMode(mode)) {
+        return {
+          type: 'error',
+          message: `Usage: /autoapprove <${AUTO_APPROVE_MODES.join('|')}>`,
+        };
+      }
+      return { type: 'set-autoapprove', mode };
+    }
     case 'stats':
       return { type: 'stats' };
     case 'export':

@@ -71,4 +71,31 @@ describe('parseCommand', () => {
   it('parses /cancel', () => {
     expect(parseCommand('/cancel')).toEqual({ type: 'cancel' });
   });
+
+  it('parses /autoapprove with each valid mode', () => {
+    expect(parseCommand('/autoapprove none')).toEqual({ type: 'set-autoapprove', mode: 'none' });
+    expect(parseCommand('/autoapprove read-only')).toEqual({ type: 'set-autoapprove', mode: 'read-only' });
+    expect(parseCommand('/autoapprove all')).toEqual({ type: 'set-autoapprove', mode: 'all' });
+  });
+
+  it('parses /autoapprove with no args as show-status', () => {
+    expect(parseCommand('/autoapprove')).toEqual({ type: 'show-autoapprove' });
+  });
+
+  it('rejects invalid /autoapprove mode', () => {
+    const action = parseCommand('/autoapprove destructively');
+    expect(action.type).toBe('error');
+    if (action.type === 'error') {
+      expect(action.message).toContain('read-only');
+    }
+  });
+
+  it('matches the /auto alias', () => {
+    expect(parseCommand('/auto read-only')).toEqual({ type: 'set-autoapprove', mode: 'read-only' });
+  });
+
+  it('filters /autoapprove by prefix and alias', () => {
+    expect(getFilteredCommands('auto')).toHaveLength(1);
+    expect(getFilteredCommands('autoapprove')[0].name).toBe('autoapprove');
+  });
 });

@@ -13,6 +13,10 @@ program
   .option('-m, --model <model>', 'Model to use (env: XAKU_MODEL; default: first installed)')
   .option('-u, --base-url <url>', 'Ollama base URL (env: XAKU_BASE_URL)')
   .option('-t, --temperature <temp>', 'Sampling temperature (0-2)')
+  .option(
+    '--auto-approve <mode>',
+    'Auto-approve tools without prompting: none | read-only | all (env: XAKU_AUTO_APPROVE)',
+  )
   .parse();
 
 const [workspaceArg] = program.args;

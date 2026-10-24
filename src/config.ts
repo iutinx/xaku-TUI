@@ -6,6 +6,15 @@ export interface CliOptions {
   baseUrl?: string;
   model?: string;
   temperature?: string;
+  autoApprove?: string;
+}
+
+export type AutoApproveMode = 'none' | 'read-only' | 'all';
+
+export const AUTO_APPROVE_MODES: AutoApproveMode[] = ['none', 'read-only', 'all'];
+
+export function isAutoApproveMode(value: string): value is AutoApproveMode {
+  return (AUTO_APPROVE_MODES as string[]).includes(value);
 }
 
 export interface Config {
@@ -20,6 +29,8 @@ export interface Config {
   casesDir: string;
   shellTimeoutMs: number;
   maxResultBytes: number;
+  /** Skip the approval prompt for trusted tools. */
+  autoApprove: AutoApproveMode;
 }
 
 const DEFAULT_BASE_URL = process.env.XAKU_BASE_URL ?? 'http://localhost:11434/v1';
@@ -44,6 +55,7 @@ export async function buildConfig(
   const baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, '');
   const model = options.model ?? process.env.XAKU_MODEL ?? null;
   const temperature = parseTemperature(options.temperature);
+  const autoApprove = parseAutoApprove(options.autoApprove ?? process.env.XAKU_AUTO_APPROVE);
 
   const paths = envPaths('xaku', { suffix: '' });
 
@@ -58,7 +70,17 @@ export async function buildConfig(
     casesDir: path.join(paths.data, 'cases'),
     shellTimeoutMs: 30_000,
     maxResultBytes: 100_000,
+    autoApprove,
   };
+}
+
+function parseAutoApprove(raw: string | undefined): AutoApproveMode {
+  if (raw === undefined || raw === '') return 'none';
+  const value = raw.toLowerCase();
+  if (!isAutoApproveMode(value)) {
+    throw new Error(`Invalid auto-approve mode: ${raw} (expected none | read-only | all)`);
+  }
+  return value;
 }
 
 function parseTemperature(raw: string | undefined): number {

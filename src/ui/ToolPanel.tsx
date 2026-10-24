@@ -60,12 +60,20 @@ function ToolActivityView({ activity }: { activity: ToolActivity }) {
           </Box>
           <Box marginTop={1}>
             <Text color={theme.primary}>
-              [a] approve  [d] deny
+              [a] approve  [d] deny  [t] auto-approve
             </Text>
           </Box>
         </Box>
       )}
       
+      {activity.autoApproved && (
+        <Box marginLeft={2}>
+          <Text color={theme.warning}>
+            {symbols.treeLast} auto-approved
+          </Text>
+        </Box>
+      )}
+
       {activity.status === 'success' && activity.result && (
         <Box marginLeft={2}>
           <Text color={theme.muted}>
@@ -102,6 +110,14 @@ function ToolActivityView({ activity }: { activity: ToolActivity }) {
           </Text>
         </Box>
       )}
+
+      {activity.status === 'cancelled' && (
+        <Box marginLeft={2}>
+          <Text color={theme.warning}>
+            {symbols.treeLast} cancelled by user
+          </Text>
+        </Box>
+      )}
     </Box>
   );
 }
@@ -120,6 +136,8 @@ function getStatusIcon(status: ToolActivityStatus): string {
       return symbols.failure;
     case 'skipped':
       return symbols.skipped;
+    case 'cancelled':
+      return symbols.skipped;
   }
 }
 
@@ -136,6 +154,8 @@ function getStatusColor(status: ToolActivityStatus): string {
     case 'denied':
       return theme.failure;
     case 'skipped':
+      return theme.warning;
+    case 'cancelled':
       return theme.warning;
   }
 }
