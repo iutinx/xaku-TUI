@@ -39,6 +39,20 @@ export const COMMANDS: CommandDef[] = [
     aliases: ['auto'],
   },
   {
+    name: 'compact',
+    description: 'Collapse or expand completed tool activities',
+  },
+  {
+    name: 'benchmark',
+    description: 'Run a saved test case across models and compare speed/tools',
+    hint: '<case> [model,model,…]',
+  },
+  {
+    name: 'replay',
+    description: 'Step through a past session from its log',
+    hint: '[index]',
+  },
+  {
     name: 'stats',
     description: 'Show detailed speed and tool statistics',
   },
@@ -76,6 +90,9 @@ export type CommandAction =
   | { type: 'list-models' }
   | { type: 'set-autoapprove'; mode: AutoApproveMode }
   | { type: 'show-autoapprove' }
+  | { type: 'toggle-compact' }
+  | { type: 'benchmark'; name: string; models?: string[] }
+  | { type: 'replay'; index?: number }
   | { type: 'stats' }
   | { type: 'export' }
   | { type: 'save'; name: string }
@@ -107,6 +124,24 @@ export function parseCommand(input: string): CommandAction {
     }
     case 'retry':
       return { type: 'retry' };
+    case 'compact':
+      return { type: 'toggle-compact' };
+    case 'benchmark': {
+      if (!args) return { type: 'error', message: 'Usage: /benchmark <case-name> [model,model,…]' };
+      const [name, modelList] = args.split(/\s+/);
+      const models = modelList
+        ? modelList.split(',').map((m) => m.trim()).filter(Boolean)
+        : undefined;
+      return { type: 'benchmark', name, models };
+    }
+    case 'replay': {
+      if (!args) return { type: 'replay' };
+      const index = Number(args);
+      if (!Number.isInteger(index) || index < 1) {
+        return { type: 'error', message: 'Usage: /replay [1-based session index]' };
+      }
+      return { type: 'replay', index };
+    }
     case 'autoapprove':
     case 'auto': {
       if (!args) return { type: 'show-autoapprove' };

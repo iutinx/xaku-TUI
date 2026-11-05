@@ -1,4 +1,4 @@
-import { Box, useInput, useStdout } from 'ink';
+import { Box, Text, useInput, useStdout } from 'ink';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Config, AutoApproveMode } from './config.js';
 import { AUTO_APPROVE_MODES } from './config.js';
@@ -14,19 +14,38 @@ import { estimateContextTokens, estimateTokens, fillMissingToolResults, type Con
 import { createLogger } from './logger.js';
 import { exportSession } from './commands/report.js';
 import { saveTestCase, loadTestCase } from './commands/cases.js';
+import { runBenchmark, type BenchmarkResult } from './model/benchmark.js';
+import { BenchmarkPanel } from './ui/BenchmarkPanel.js';
+import { listSessions, loadSession, reconstructUpTo, type LogEvent, type SessionSummary } from './model/replay.js';
+import { SessionPicker } from './ui/SessionPicker.js';
 import { ChatPanel } from './ui/ChatPanel.js';
 import { InputLine } from './ui/InputLine.js';
 import { StatsBar } from './ui/StatsBar.js';
 import { TopBar } from './ui/TopBar.js';
 import { ToolPanel } from './ui/ToolPanel.js';
 import type { ToolActivity } from './ui/ToolActivity.js';
+import { useScrollback, MAX_VISIBLE_MESSAGES } from './ui/useScrollback.js';
 import { validateToolCall, executeToolCall, getToolDefinitions } from './tools/executor.js';
 import { tools } from './tools/registry.js';
+import { probeExistingFile, type ExistingFileKind } from './tools/utils.js';
+import { computeDiffLines, formatDiffSummary, type DiffResult } from './ui/diff.js';
 import type { ToolContext } from './tools/types.js';
 
 export interface AppProps {
   config: Config;
 }
+
+interface BenchmarkState {
+  testCaseName: string;
+  models: string[];
+  results: BenchmarkResult[];
+  running: boolean;
+  currentModel: string | null;
+}
+
+type ReplayState =
+  | { view: 'picker'; sessions: SessionSummary[]; selected: number }
+  | { view: 'play'; fileName: string; events: LogEvent[]; cursor: number };
 
 export default function App({ config }: AppProps) {
   const client = useMemo(() => createClient(config.baseUrl), [config.baseUrl]);
@@ -69,9 +88,17 @@ export default function App({ config }: AppProps) {
   });
 
   const [toolActivities, setToolActivities] = useState<ToolActivity[]>([]);
-  const [pendingApproval, setPendingApproval] = useState<string | null>(null); // activity id awaiting approval
+  const [toolCompact, setToolCompact] = useState(false);
+  // Activity ids awaiting approval in the current batch (multiple tools can be
+  // pending at once; the user approves/denies as a batch or focuses one item).
+  const [pendingBatch, setPendingBatch] = useState<string[]>([]);
+  const [focusedActivity, setFocusedActivity] = useState<string | null>(null);
   const [autoApprove, setAutoApproveState] = useState<AutoApproveMode>(config.autoApprove);
   const autoApproveRef = useRef<AutoApproveMode>(config.autoApprove);
+
+  const [bench, setBench] = useState<BenchmarkState | null>(null);
+  const benchControllerRef = useRef<AbortController | null>(null);
+  const [replay, setReplay] = useState<ReplayState | null>(null);
 
   function setAutoApprove(mode: AutoApproveMode) {
     autoApproveRef.current = mode;
@@ -124,6 +151,8 @@ export default function App({ config }: AppProps) {
     };
   }, [stdout]);
 
+  const scrollback = useScrollback(messages.length, termRows);
+
   async function testConnection() {
     try {
       const models = await listInstalledModels(config.baseUrl);
@@ -166,14 +195,78 @@ export default function App({ config }: AppProps) {
   }
 
   const hasFailedTool = toolActivities.some((a) => a.status === 'failed');
-  const hasToolPrompt = pendingApproval !== null || hasFailedTool;
+  const hasToolPrompt = pendingBatch.length > 0 || hasFailedTool;
   const connectionError = !!error && error.includes('press Enter to retry');
+  // Idle + empty input: arrow/PgUp/PgDn keys are not claimed by InputLine or
+  // the CommandMenu, so scrollback can use them freely.
+  const scrollActive = !generating && !hasToolPrompt && !connectionError && input === '';
 
   useInput(
     (char, key) => {
-      if (key.escape && generating) {
-        cancelGeneration();
+      if (replay) {
+        if (key.escape) {
+          setReplay(null);
+        } else if (replay.view === 'picker') {
+          if (key.upArrow) {
+            setReplay({ ...replay, selected: Math.max(0, replay.selected - 1) });
+          } else if (key.downArrow) {
+            setReplay({ ...replay, selected: Math.min(replay.sessions.length - 1, replay.selected + 1) });
+          } else if (key.return) {
+            void openReplaySession(replay.sessions[replay.selected]);
+          }
+        } else {
+          const total = replay.events.length;
+          if (key.rightArrow) {
+            setReplay({ ...replay, cursor: Math.min(total - 1, replay.cursor + 1) });
+          } else if (key.leftArrow) {
+            setReplay({ ...replay, cursor: Math.max(0, replay.cursor - 1) });
+          } else if (key.pageUp) {
+            setReplay({ ...replay, cursor: 0 });
+          } else if (key.pageDown) {
+            setReplay({ ...replay, cursor: Math.max(0, total - 1) });
+          }
+        }
         return;
+      }
+
+      if (key.upArrow) {
+        scrollback.up();
+        return;
+      }
+      if (key.downArrow) {
+        scrollback.down();
+        return;
+      }
+      if (key.pageUp) {
+        scrollback.pageUp();
+        return;
+      }
+      if (key.pageDown) {
+        scrollback.pageDown();
+        return;
+      }
+
+      if (key.escape) {
+        if (focusedActivity) {
+          setFocusedActivity(null);
+          return;
+        }
+        if (bench?.running) {
+          cancelBenchmark();
+          return;
+        }
+        if (bench) {
+          setBench(null);
+          return;
+        }
+        if (scrollback.isScrolled) {
+          scrollback.end();
+          return;
+        }
+        if (generating) {
+          cancelGeneration();
+          return;
+        }
       }
 
       if (char === 't' && generating) {
@@ -181,13 +274,30 @@ export default function App({ config }: AppProps) {
         return;
       }
 
-      if (pendingApproval) {
-        if (char === 'a') {
-          approveToolCall(pendingApproval);
+      if (char === 'c' && (generating || hasToolPrompt) && toolActivities.length > 0) {
+        toggleToolCompact();
+        return;
+      }
+
+      if (pendingBatch.length > 0) {
+        if (focusedActivity) {
+          if (char === 'a') {
+            approveToolCall(focusedActivity);
+            return;
+          }
+          if (char === 'd') {
+            denyToolCall(focusedActivity);
+            return;
+          }
+        } else if (char === 'a') {
+          for (const id of [...pendingBatch]) approveToolCall(id);
           return;
-        }
-        if (char === 'd') {
-          denyToolCall(pendingApproval);
+        } else if (char === 'd') {
+          for (const id of [...pendingBatch]) denyToolCall(id);
+          return;
+        } else if (/^[1-9]$/.test(char)) {
+          const target = pendingBatch[Number(char) - 1];
+          if (target) setFocusedActivity(target);
           return;
         }
       }
@@ -215,8 +325,21 @@ export default function App({ config }: AppProps) {
         testConnection();
       }
     },
-    { isActive: generating || hasToolPrompt || connectionError },
+    { isActive: generating || hasToolPrompt || connectionError || scrollActive || bench !== null || replay !== null },
   );
+
+  // Any typed character leaves scrollback and returns to the live tail.
+  useEffect(() => {
+    if (input !== '') {
+      if (scrollback.isScrolled) {
+        scrollback.end();
+      }
+      if (bench && !bench.running) {
+        setBench(null);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [input]);
 
   function cleanupGeneration(): number {
     generationEpochRef.current += 1;
@@ -245,7 +368,8 @@ export default function App({ config }: AppProps) {
     setGenerating(false);
     setPartial('');
     setReasoning('');
-    setPendingApproval(null);
+    setPendingBatch([]);
+    setFocusedActivity(null);
     setStats((s) => ({ ...s, generationStart: null }));
     return runningActivities.length;
   }
@@ -285,7 +409,8 @@ export default function App({ config }: AppProps) {
       resolver(true);
       approvalResolvers.current.delete(activityId);
     }
-    setPendingApproval(null);
+    setPendingBatch((prev) => prev.filter((id) => id !== activityId));
+    setFocusedActivity((prev) => (prev === activityId ? null : prev));
     setToolActivities((prev) =>
       prev.map((a) => (a.id === activityId ? { ...a, status: 'approved' } : a)),
     );
@@ -297,7 +422,8 @@ export default function App({ config }: AppProps) {
       resolver(false);
       approvalResolvers.current.delete(activityId);
     }
-    setPendingApproval(null);
+    setPendingBatch((prev) => prev.filter((id) => id !== activityId));
+    setFocusedActivity((prev) => (prev === activityId ? null : prev));
     setToolActivities((prev) =>
       prev.map((a) => (a.id === activityId ? { ...a, status: 'denied' } : a)),
     );
@@ -306,11 +432,11 @@ export default function App({ config }: AppProps) {
   function applyAutoApprove(mode: AutoApproveMode, via: 'command' | 'hotkey') {
     setAutoApprove(mode);
     logger.log({ event: 'set_auto_approve', mode, via });
-    // If the currently pending tool is covered by the new mode, approve it now.
-    if (pendingApproval) {
-      const activity = toolActivities.find((a) => a.id === pendingApproval);
+    // Any pending tool covered by the new mode is approved immediately.
+    for (const activityId of [...pendingBatch]) {
+      const activity = toolActivities.find((a) => a.id === activityId);
       if (activity && (mode === 'all' || (mode === 'read-only' && tools[activity.toolName]?.isReadOnly))) {
-        approveToolCall(pendingApproval);
+        approveToolCall(activityId);
       }
     }
   }
@@ -322,6 +448,79 @@ export default function App({ config }: AppProps) {
     applyAutoApprove(next, 'hotkey');
   }
 
+  function toggleToolCompact(via: 'hotkey' | 'command' = 'hotkey') {
+    const next = !toolCompact;
+    setToolCompact(next);
+    logger.log({ event: 'set_tool_compact', compact: next, via });
+  }
+
+  function startBenchmark(models: string[], testCaseName: string, testCase: { prompt: string; systemPrompt: string | null }) {
+    cleanupGeneration();
+    const controller = new AbortController();
+    benchControllerRef.current = controller;
+    setToolActivities([]);
+    setBench({ testCaseName, models, results: [], running: true, currentModel: models[0] });
+    addSystemMessage(`Benchmark started: ${models.length} model(s) on "${testCaseName}". Esc cancels.`);
+    logger.log({ event: 'benchmark_start', case: testCaseName, models });
+
+    runBenchmark(models, {
+      client,
+      testCase,
+      temperature,
+      systemPrompt,
+      toolCtx: {
+        workspace: config.workspace,
+        maxResultBytes: config.maxResultBytes,
+        shellTimeoutMs: config.shellTimeoutMs,
+      },
+      signal: controller.signal,
+      onModelStart: (model, _index, _total) => {
+        setBench((prev) => (prev ? { ...prev, currentModel: model } : prev));
+      },
+      onModelEnd: (result) => {
+        setBench((prev) => (prev ? { ...prev, results: [...prev.results, result] } : prev));
+      },
+    })
+      .then((results) => {
+        setBench((prev) => (prev ? { ...prev, results, running: false, currentModel: null } : prev));
+        logger.log({
+          event: 'benchmark_end',
+          case: testCaseName,
+          results: results.map((r) => ({ model: r.model, status: r.status, totalTimeMs: r.totalTimeMs })),
+        });
+      })
+      .finally(() => {
+        benchControllerRef.current = null;
+      });
+  }
+
+  function cancelBenchmark() {
+    benchControllerRef.current?.abort();
+    setBench((prev) => (prev ? { ...prev, running: false, currentModel: null } : prev));
+    logger.log({ event: 'benchmark_cancelled' });
+    addSystemMessage('Benchmark cancelled.');
+  }
+
+  async function openReplaySession(summary: SessionSummary) {
+    try {
+      const events = await loadSession(config.logsDir, summary.fileName);
+      if (events.length === 0) {
+        addSystemMessage('Session log is empty.');
+        return;
+      }
+      logger.log({ event: 'replay_open', file: summary.fileName, events: events.length });
+      setReplay({ view: 'play', fileName: summary.fileName, events, cursor: 0 });
+    } catch (err) {
+      addSystemMessage(`Replay failed to load: ${err instanceof Error ? err.message : String(err)}`);
+      setReplay(null);
+    }
+  }
+
+  const replaySnapshot = useMemo(
+    () => (replay?.view === 'play' ? reconstructUpTo(replay.events, replay.cursor) : null),
+    [replay],
+  );
+
   function fixToolCall(activityId: string) {
     const activity = toolActivities.find((a) => a.id === activityId);
     if (!activity) return;
@@ -329,7 +528,7 @@ export default function App({ config }: AppProps) {
     setToolActivities((prev) =>
       prev.map((a) => (a.id === activityId ? { ...a, status: 'skipped' } : a)),
     );
-    logger.log({ event: 'tool_choice', tool: activity.toolName, args: activity.arguments, choice: 'fix' });
+    logger.log({ event: 'tool_choice', toolCallId: activity.toolCallId, tool: activity.toolName, args: activity.arguments, choice: 'fix' });
     const errorMsg = activity.error ?? 'Tool call failed';
     const toolMsg: ConversationMessage = {
       role: 'tool',
@@ -346,7 +545,7 @@ export default function App({ config }: AppProps) {
     setToolActivities((prev) =>
       prev.map((a) => (a.id === activityId ? { ...a, status: 'skipped' } : a)),
     );
-    logger.log({ event: 'tool_choice', tool: activity.toolName, args: activity.arguments, choice: 'skip' });
+    logger.log({ event: 'tool_choice', toolCallId: activity.toolCallId, tool: activity.toolName, args: activity.arguments, choice: 'skip' });
     const toolMsg: ConversationMessage = {
       role: 'tool',
       tool_call_id: activity.toolCallId,
@@ -366,7 +565,7 @@ export default function App({ config }: AppProps) {
       tool_call_id: activity.toolCallId,
       content: result.error ? `Error: ${result.error}` : (result.output || ''),
     };
-    logger.log({ event: 'tool_choice', tool: activity.toolName, args: activity.arguments, choice: 'retry' });
+    logger.log({ event: 'tool_choice', toolCallId: activity.toolCallId, tool: activity.toolName, args: activity.arguments, choice: 'retry' });
     resumeGeneration([...messages, toolMsg]);
   }
 
@@ -377,7 +576,8 @@ export default function App({ config }: AppProps) {
     setGenerating(true);
     setPartial('');
     setReasoning('');
-    setPendingApproval(null);
+    setPendingBatch([]);
+    setFocusedActivity(null);
     setToolActivities([]);
     toolCallsRef.current = [];
     generatedTokensRef.current = 0;
@@ -403,6 +603,7 @@ export default function App({ config }: AppProps) {
             temperature,
             systemPrompt,
             tools: toolDefs,
+            signal: abortController.signal,
           },
           {
             onContent(content) {
@@ -465,6 +666,11 @@ export default function App({ config }: AppProps) {
         }
 
         const newActivities: ToolActivity[] = [];
+        const probeCtx: ToolContext = {
+          workspace: config.workspace,
+          maxResultBytes: config.maxResultBytes,
+          shellTimeoutMs: config.shellTimeoutMs,
+        };
 
         for (const tc of result.toolCalls) {
           const callId = tc.id || `call_${Date.now()}_${tc.index}`;
@@ -482,6 +688,23 @@ export default function App({ config }: AppProps) {
             function: { name: toolName, arguments: tc.function?.arguments || '{}' },
           });
 
+          let fileState: ExistingFileKind | undefined;
+          let diff: DiffResult | undefined;
+          let preview = buildPreview(toolName, args);
+
+          if (
+            toolName === 'write_file' &&
+            typeof args.path === 'string' &&
+            typeof args.content === 'string'
+          ) {
+            const probe = await probeExistingFile(args.path, probeCtx);
+            fileState = probe.kind;
+            if (probe.kind === 'existing' || probe.kind === 'new') {
+              diff = computeDiffLines(probe.content ?? '', args.content);
+              preview = `path: ${args.path}\n${formatDiffSummary(diff, probe.kind === 'new')}`;
+            }
+          }
+
           const activity: ToolActivity = {
             id: `activity_${callId}`,
             toolCallId: callId,
@@ -489,12 +712,15 @@ export default function App({ config }: AppProps) {
             arguments: args,
             status: validation.valid ? 'awaiting_approval' : 'failed',
             validationError: validation.error,
-            preview: buildPreview(toolName, args),
+            preview,
+            fileState,
+            diff,
           };
 
           newActivities.push(activity);
           logger.log({
             event: 'tool_call',
+            toolCallId: callId,
             tool: toolName,
             args,
             valid: validation.valid,
@@ -504,15 +730,21 @@ export default function App({ config }: AppProps) {
 
         setToolActivities((prev) => [...prev, ...newActivities]);
 
-        for (const activity of newActivities) {
-          if (activity.status === 'failed') {
-            setStats((s) => ({ ...s, toolFail: s.toolFail + 1 }));
-            continue;
-          }
+        const failedActivities = newActivities.filter((a) => a.status === 'failed');
+        if (failedActivities.length > 0) {
+          setStats((s) => ({ ...s, toolFail: s.toolFail + failedActivities.length }));
+        }
 
-          let approved: boolean;
+        // Phase 1 — approval. Auto-approved items resolve instantly; manual items
+        // wait together as a batch. The user resolves the whole batch with
+        // a/d or focuses a single item with 1-9.
+        const decisions = new Map<string, boolean>();
+        const manualItems: ToolActivity[] = [];
+
+        for (const activity of newActivities) {
+          if (activity.status === 'failed') continue;
           if (shouldAutoApprove(activity.toolName)) {
-            approved = true;
+            decisions.set(activity.id, true);
             setToolActivities((prev) =>
               prev.map((a) =>
                 a.id === activity.id ? { ...a, status: 'approved', autoApproved: true } : a,
@@ -520,41 +752,71 @@ export default function App({ config }: AppProps) {
             );
             logger.log({
               event: 'tool_auto_approved',
+              toolCallId: activity.toolCallId,
               tool: activity.toolName,
               args: activity.arguments,
               mode: autoApproveRef.current,
             });
           } else {
-            setPendingApproval(activity.id);
-            approved = await new Promise<boolean>((resolve) => {
-              approvalResolvers.current.set(activity.id, resolve);
-            });
-            if (generationEpochRef.current !== epoch) return;
+            manualItems.push(activity);
           }
+        }
 
-          if (approved) {
-            const result = await executeToolActivity(activity);
-            const toolMsg: ConversationMessage = {
+        if (manualItems.length > 0) {
+          setPendingBatch(manualItems.map((a) => a.id));
+          const approvals = await Promise.all(
+            manualItems.map(
+              (activity) =>
+                new Promise<boolean>((resolve) => {
+                  approvalResolvers.current.set(activity.id, resolve);
+                }),
+            ),
+          );
+          if (generationEpochRef.current !== epoch) return;
+          manualItems.forEach((activity, i) => decisions.set(activity.id, approvals[i]));
+          setPendingBatch([]);
+        }
+
+        // Phase 2 — execute approved tools concurrently. Each executeToolActivity
+        // registers its own AbortController, so Esc still cancels mid-flight.
+        const runnable = newActivities.filter((a) => decisions.get(a.id) === true);
+        const execResults = await Promise.all(runnable.map((a) => executeToolActivity(a)));
+        if (generationEpochRef.current !== epoch) return;
+
+        const resultById = new Map<string, Awaited<ReturnType<typeof executeToolActivity>>>();
+        runnable.forEach((activity, i) => resultById.set(activity.id, execResults[i]));
+
+        // Tool results go back in the original tool_calls order.
+        for (const activity of newActivities) {
+          const decision = decisions.get(activity.id);
+          if (decision === true) {
+            const result = resultById.get(activity.id);
+            history = [...history, {
               role: 'tool',
               tool_call_id: activity.toolCallId,
-              content: result.error ? `Error: ${result.error}` : (result.output || ''),
-            };
-            history = [...history, toolMsg];
-            setMessages(history);
-          } else {
-            const toolMsg: ConversationMessage = {
+              content: result?.error ? `Error: ${result.error}` : (result?.output || ''),
+            }];
+          } else if (decision === false) {
+            history = [...history, {
               role: 'tool',
               tool_call_id: activity.toolCallId,
               content: 'Tool call denied by user',
-            };
-            history = [...history, toolMsg];
-            setMessages(history);
+            }];
             logger.log({
               event: 'tool_denied',
+              toolCallId: activity.toolCallId,
               tool: activity.toolName,
               args: activity.arguments,
             });
           }
+        }
+        setMessages(history);
+
+        if (failedActivities.length > 0) {
+          // Pause for the user's [f]ix/[s]kip/[r]ettry choice on invalid calls;
+          // those handlers resume the turn via resumeGeneration. Continuing would
+          // send the assistant's tool_calls with missing results to the API.
+          return;
         }
 
         setPartial('');
@@ -563,7 +825,7 @@ export default function App({ config }: AppProps) {
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      if (err instanceof Error && err.name === 'AbortError') {
+      if (err instanceof Error && (err.name === 'AbortError' || err.name === 'APIUserAbortError')) {
         return;
       }
       if (/404|not found/i.test(message)) {
@@ -582,7 +844,8 @@ export default function App({ config }: AppProps) {
         setGenerating(false);
         setPartial('');
         setReasoning('');
-        setPendingApproval(null);
+        setPendingBatch([]);
+        setFocusedActivity(null);
         setStats((s) => ({ ...s, generationStart: null }));
         abortControllerRef.current = null;
       }
@@ -633,6 +896,7 @@ export default function App({ config }: AppProps) {
       );
       logger.log({
         event: 'tool_cancelled',
+        toolCallId: activity.toolCallId,
         tool: activity.toolName,
         args: activity.arguments,
         duration,
@@ -657,6 +921,7 @@ export default function App({ config }: AppProps) {
       setStats((s) => ({ ...s, toolFail: s.toolFail + 1 }));
       logger.log({
         event: 'tool_error',
+        toolCallId: activity.toolCallId,
         tool: activity.toolName,
         args: activity.arguments,
         error: result.error,
@@ -674,10 +939,12 @@ export default function App({ config }: AppProps) {
       setStats((s) => ({ ...s, toolSuccess: s.toolSuccess + 1 }));
       logger.log({
         event: 'tool_success',
+        toolCallId: activity.toolCallId,
         tool: activity.toolName,
         args: activity.arguments,
         duration,
         trimmed: result.trimmed,
+        output: (result.output ?? '').slice(0, 4000),
       });
     }
 
@@ -697,6 +964,7 @@ export default function App({ config }: AppProps) {
           setMessages([]);
           setPartial('');
           setError(null);
+          setToolCompact(false);
           logger.log({ event: 'clear' });
           break;
         case 'set-system':
@@ -740,6 +1008,50 @@ export default function App({ config }: AppProps) {
               : `Auto-approve enabled: ${action.mode}.`,
           );
           break;
+        case 'toggle-compact':
+          toggleToolCompact('command');
+          break;
+        case 'benchmark': {
+          if (bench?.running) {
+            addSystemMessage('A benchmark is already running (Esc to cancel).');
+            break;
+          }
+          try {
+            const testCase = await loadTestCase(config, action.name);
+            let models = action.models;
+            if (!models || models.length === 0) {
+              const installed = await listInstalledModels(config.baseUrl);
+              models = installed.map((m) => m.name);
+            }
+            if (models.length === 0) {
+              addSystemMessage('No models available to benchmark.');
+              break;
+            }
+            startBenchmark(models, action.name, testCase);
+          } catch (err) {
+            addSystemMessage(
+              `Benchmark failed to start: ${err instanceof Error ? err.message : String(err)}. Save a test case first with /save <name>.`,
+            );
+          }
+          break;
+        }
+        case 'replay': {
+          if (replay) {
+            addSystemMessage('Already in replay mode (Esc to exit).');
+            break;
+          }
+          const sessions = await listSessions(config.logsDir);
+          if (sessions.length === 0) {
+            addSystemMessage(`No past sessions found in ${config.logsDir}.`);
+            break;
+          }
+          if (action.index && action.index <= sessions.length) {
+            await openReplaySession(sessions[action.index - 1]);
+          } else {
+            setReplay({ view: 'picker', sessions, selected: 0 });
+          }
+          break;
+        }
         case 'show-autoapprove':
           addSystemMessage(`Auto-approve is "${autoApprove}". Usage: /autoapprove <none|read-only|all>`);
           break;
@@ -828,6 +1140,7 @@ export default function App({ config }: AppProps) {
   }
 
   async function generate(userContent: string) {
+    scrollback.end();
     setGenerating(true);
     setPartial('');
     setReasoning('');
@@ -856,30 +1169,94 @@ export default function App({ config }: AppProps) {
         autoApprove={autoApprove}
       />
       <Box flexDirection="row" flexGrow={1} overflow="hidden">
-        <Box flexGrow={toolActivities.length > 0 ? 1 : 1} flexDirection="column">
-          <ChatPanel messages={messages} partial={partial} reasoning={reasoning} generating={generating} error={error} />
-        </Box>
-        {toolActivities.length > 0 && (
-          <Box flexGrow={1} flexDirection="column">
-            <ToolPanel activities={toolActivities} />
+        {replay?.view === 'picker' ? (
+          <Box flexDirection="column" flexGrow={1}>
+            <SessionPicker sessions={replay.sessions} selectedIndex={replay.selected} />
           </Box>
+        ) : replay?.view === 'play' && replaySnapshot ? (
+          <>
+            <Box flexGrow={1} flexDirection="column">
+              <Box paddingX={1}>
+                <Text bold color="cyan">
+                  Replay · {replay.fileName} · event {replay.cursor + 1}/{replay.events.length} · ←/→ step · PgUp/PgDn jump · Esc exit
+                </Text>
+              </Box>
+              <ChatPanel
+                messages={replaySnapshot.messages}
+                partial=""
+                reasoning=""
+                generating={false}
+                error={null}
+              />
+            </Box>
+            {replaySnapshot.activities.length > 0 && (
+              <Box flexGrow={1} flexDirection="column">
+                <ToolPanel activities={replaySnapshot.activities} />
+              </Box>
+            )}
+          </>
+        ) : (
+          <>
+            <Box flexGrow={1} flexDirection="column">
+              {bench ? (
+                <BenchmarkPanel
+                  testCaseName={bench.testCaseName}
+                  models={bench.models}
+                  results={bench.results}
+                  running={bench.running}
+                  currentModel={bench.currentModel}
+                />
+              ) : (
+                <ChatPanel
+                  messages={messages}
+                  partial={partial}
+                  reasoning={reasoning}
+                  generating={generating}
+                  error={error}
+                  scrollOffset={scrollback.offset}
+                />
+              )}
+            </Box>
+            {toolActivities.length > 0 && (
+              <Box flexGrow={1} flexDirection="column">
+                <ToolPanel
+                  activities={toolActivities}
+                  compact={toolCompact}
+                  pendingIds={pendingBatch}
+                  focusedId={focusedActivity}
+                />
+              </Box>
+            )}
+          </>
         )}
       </Box>
       <InputLine
         value={input}
         onChange={setInput}
         onSubmit={handleSubmit}
-        disabled={generating || hasToolPrompt || connectionError}
+        disabled={generating || hasToolPrompt || connectionError || (bench?.running ?? false) || replay !== null}
         placeholder={
           connectionError
             ? 'Ollama unreachable — press Enter to retry'
-            : pendingApproval
-              ? 'Press [a] approve, [d] deny, or [t] cycle auto-approve'
-              : hasFailedTool
-                ? 'Press [f] fix, [s] skip, or [r] retry'
-                : generating
-                  ? 'Generating…'
-                  : 'Type a message, or / for commands'
+            : replay?.view === 'picker'
+              ? '↑↓ select session · Enter load · Esc exit'
+              : replay?.view === 'play'
+                ? '←/→ step events · PgUp/PgDn jump · Esc exit replay'
+                : bench?.running
+              ? 'Benchmark running — press Esc to cancel'
+              : focusedActivity
+              ? 'Press [a] approve, [d] deny this tool, [Esc] back to batch'
+              : pendingBatch.length > 1
+                ? `Press [a] approve all, [d] deny all, [1-${pendingBatch.length}] review one`
+                : pendingBatch.length === 1
+                  ? 'Press [a] approve, [d] deny, or [t] cycle auto-approve'
+                  : hasFailedTool
+                    ? 'Press [f] fix, [s] skip, or [r] retry'
+                    : generating
+                      ? 'Generating…'
+                      : messages.length > MAX_VISIBLE_MESSAGES
+                        ? 'Type a message · ↑/PgUp to scroll, / for commands'
+                        : 'Type a message, or / for commands'
         }
       />
       <StatsBar

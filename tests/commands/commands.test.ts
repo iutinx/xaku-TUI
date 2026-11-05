@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { COMMANDS, getFilteredCommands, parseCommand } from './index.js';
+import { COMMANDS, getFilteredCommands, parseCommand } from '../../src/commands/index.js';
 
 describe('getFilteredCommands', () => {
   it('returns all commands for an empty query', () => {
@@ -70,6 +70,36 @@ describe('parseCommand', () => {
 
   it('parses /cancel', () => {
     expect(parseCommand('/cancel')).toEqual({ type: 'cancel' });
+  });
+
+  it('parses /compact as a toggle', () => {
+    expect(parseCommand('/compact')).toEqual({ type: 'toggle-compact' });
+  });
+
+  it('filters /compact by prefix', () => {
+    expect(getFilteredCommands('comp')[0].name).toBe('compact');
+  });
+
+  it('parses /benchmark with explicit model list', () => {
+    expect(parseCommand('/benchmark webtest qwen3:4b,qwen3:8b')).toEqual({
+      type: 'benchmark',
+      name: 'webtest',
+      models: ['qwen3:4b', 'qwen3:8b'],
+    });
+  });
+
+  it('parses /benchmark without models as all-installed', () => {
+    expect(parseCommand('/benchmark webtest')).toEqual({ type: 'benchmark', name: 'webtest', models: undefined });
+  });
+
+  it('rejects /benchmark without a case name', () => {
+    expect(parseCommand('/benchmark').type).toBe('error');
+  });
+
+  it('parses /replay with and without an index', () => {
+    expect(parseCommand('/replay')).toEqual({ type: 'replay' });
+    expect(parseCommand('/replay 3')).toEqual({ type: 'replay', index: 3 });
+    expect(parseCommand('/replay x').type).toBe('error');
   });
 
   it('parses /autoapprove with each valid mode', () => {

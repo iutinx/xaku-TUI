@@ -1,14 +1,38 @@
 import { Box, Text } from 'ink';
 import type { ToolActivity, ToolActivityStatus } from './ToolActivity.js';
+import { formatDiffSummary, type DiffLineType, type DiffResult } from './diff.js';
 import { symbols, theme } from './theme.js';
 
 export interface ToolPanelProps {
   activities: ToolActivity[];
+  compact?: boolean;
+  /** Activity ids awaiting approval in the current batch (order = 1-9 hotkeys). */
+  pendingIds?: string[];
+  /** Activity id focused for individual review, if any. */
+  focusedId?: string | null;
 }
 
-export function ToolPanel({ activities }: ToolPanelProps) {
+const TERMINAL_STATUSES: ToolActivityStatus[] = ['success', 'denied', 'skipped', 'cancelled'];
+
+const COMPACT_LABELS: Record<string, string> = {
+  success: 'succeeded',
+  denied: 'denied',
+  skipped: 'skipped',
+  cancelled: 'cancelled',
+};
+
+export function ToolPanel({ activities, compact = false, pendingIds = [], focusedId = null }: ToolPanelProps) {
   if (activities.length === 0) {
     return null;
+  }
+
+  const isTerminal = (a: ToolActivity) => TERMINAL_STATUSES.includes(a.status);
+  const collapsed = compact ? activities.filter(isTerminal) : [];
+  const expanded = compact ? activities.filter((a) => !isTerminal(a)) : activities;
+
+  const groups = new Map<ToolActivityStatus, number>();
+  for (const a of collapsed) {
+    groups.set(a.status, (groups.get(a.status) ?? 0) + 1);
   }
 
   return (
@@ -16,14 +40,64 @@ export function ToolPanel({ activities }: ToolPanelProps) {
       <Text bold color={theme.primary}>
         Tool Activity
       </Text>
-      {activities.map((activity) => (
-        <ToolActivityView key={activity.id} activity={activity} />
+      {expanded.map((activity) => (
+        <ToolActivityView
+          key={activity.id}
+          activity={activity}
+          pendingIndex={pendingIds.indexOf(activity.id)}
+          focused={activity.id === focusedId}
+        />
       ))}
+      {collapsed.length > 0 && <CompactSummary groups={groups} />}
+      {pendingIds.length > 0 && <BatchHint count={pendingIds.length} focused={focusedId !== null} />}
+      {!compact && activities.some(isTerminal) && (
+        <Box marginTop={1}>
+          <Text color={theme.muted}>[c] collapse {activities.filter(isTerminal).length} completed</Text>
+        </Box>
+      )}
     </Box>
   );
 }
 
-function ToolActivityView({ activity }: { activity: ToolActivity }) {
+function BatchHint({ count, focused }: { count: number; focused: boolean }) {
+  let text: string;
+  if (focused) {
+    text = '[a] approve  [d] deny  [Esc] back to batch';
+  } else if (count === 1) {
+    text = '[a] approve  [d] deny  [t] auto-approve';
+  } else {
+    text = `[a] approve all  [d] deny all  [1-${Math.min(count, 9)}] review  [t] auto-approve`;
+  }
+  return (
+    <Box marginTop={1}>
+      <Text color={theme.primary}>{text}</Text>
+    </Box>
+  );
+}
+
+function CompactSummary({ groups }: { groups: Map<ToolActivityStatus, number> }) {
+  const total = [...groups.values()].reduce((sum, n) => sum + n, 0);
+  return (
+    <Box flexDirection="column" marginTop={1}>
+      {[...groups.entries()].map(([status, count]) => (
+        <Text key={status} color={getStatusColor(status)}>
+          {getStatusIcon(status)} {count} {COMPACT_LABELS[status]}
+        </Text>
+      ))}
+      <Text color={theme.muted}>[c] expand {total} collapsed</Text>
+    </Box>
+  );
+}
+
+function ToolActivityView({
+  activity,
+  pendingIndex = -1,
+  focused = false,
+}: {
+  activity: ToolActivity;
+  pendingIndex?: number;
+  focused?: boolean;
+}) {
   const icon = getStatusIcon(activity.status);
   const iconColor = getStatusColor(activity.status);
   
@@ -32,14 +106,24 @@ function ToolActivityView({ activity }: { activity: ToolActivity }) {
     .join(' ');
   
   const durationStr = activity.duration !== undefined ? ` ${activity.duration.toFixed(1)}s` : '';
+  const badge = pendingIndex >= 0 ? `[${pendingIndex + 1}] ` : '';
 
   return (
     <Box flexDirection="column" marginTop={1}>
       <Box>
-        <Text color={iconColor}>
-          {icon} {activity.toolName} {argsStr}
-          {durationStr}
-        </Text>
+        {focused ? (
+          <Text backgroundColor="cyan" color="black" bold>
+            {badge}
+            {icon} {activity.toolName} {argsStr}
+            {durationStr}
+          </Text>
+        ) : (
+          <Text color={iconColor}>
+            {badge}
+            {icon} {activity.toolName} {argsStr}
+            {durationStr}
+          </Text>
+        )}
       </Box>
       
       {activity.validationError && (
@@ -50,19 +134,29 @@ function ToolActivityView({ activity }: { activity: ToolActivity }) {
         </Box>
       )}
       
-      {activity.status === 'awaiting_approval' && activity.preview && (
+      {activity.status === 'awaiting_approval' && (activity.diff || activity.preview) && (
         <Box flexDirection="column" marginLeft={2}>
-          <Text color={theme.muted}>
-            {symbols.treeLast} preview:
-          </Text>
-          <Box marginLeft={2}>
-            <Text dimColor>{activity.preview}</Text>
-          </Box>
-          <Box marginTop={1}>
-            <Text color={theme.primary}>
-              [a] approve  [d] deny  [t] auto-approve
-            </Text>
-          </Box>
+          {activity.diff ? (
+            <>
+              <Text color={theme.muted}>
+                {symbols.treeLast}{' '}
+                {activity.fileState === 'new' ? '' : 'diff: '}
+                {formatDiffSummary(activity.diff, activity.fileState === 'new')}
+              </Text>
+              <DiffView diff={activity.diff} />
+            </>
+          ) : (
+            <>
+              <Text color={theme.muted}>{symbols.treeLast} preview:</Text>
+              <Box marginLeft={2}>
+                <Text dimColor>
+                  {activity.fileState === 'too-large'
+                    ? `${activity.preview}\n[existing file too large to diff]`
+                    : activity.preview}
+                </Text>
+              </Box>
+            </>
+          )}
         </Box>
       )}
       
@@ -117,6 +211,28 @@ function ToolActivityView({ activity }: { activity: ToolActivity }) {
             {symbols.treeLast} cancelled by user
           </Text>
         </Box>
+      )}
+    </Box>
+  );
+}
+
+const DIFF_GUTTER: Record<DiffLineType, string> = { add: '+', del: '-', ctx: '|' };
+const DIFF_COLOR: Record<DiffLineType, string> = {
+  add: theme.success,
+  del: theme.failure,
+  ctx: theme.muted,
+};
+
+function DiffView({ diff }: { diff: DiffResult }) {
+  return (
+    <Box flexDirection="column" marginLeft={2}>
+      {diff.lines.map((line, i) => (
+        <Text key={i} color={DIFF_COLOR[line.type]}>
+          {DIFF_GUTTER[line.type]} {line.text}
+        </Text>
+      ))}
+      {diff.truncated > 0 && (
+        <Text color={theme.muted}>… and {diff.truncated} more lines</Text>
       )}
     </Box>
   );

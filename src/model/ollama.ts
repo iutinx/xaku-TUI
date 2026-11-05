@@ -102,6 +102,7 @@ export async function streamCompletion(
     temperature: number;
     systemPrompt: string | null;
     tools?: ChatCompletionTool[];
+    signal?: AbortSignal;
   },
   handlers: StreamHandlers,
 ): Promise<CompletionResult> {
@@ -111,14 +112,17 @@ export async function streamCompletion(
   }
   messages.push(...options.messages);
 
-  const stream = await client.chat.completions.create({
-    model: options.model,
-    messages,
-    temperature: options.temperature,
-    stream: true,
-    stream_options: { include_usage: true },
-    tools: options.tools && options.tools.length > 0 ? options.tools : undefined,
-  });
+  const stream = await client.chat.completions.create(
+    {
+      model: options.model,
+      messages,
+      temperature: options.temperature,
+      stream: true,
+      stream_options: { include_usage: true },
+      tools: options.tools && options.tools.length > 0 ? options.tools : undefined,
+    },
+    options.signal ? { signal: options.signal } : undefined,
+  );
 
   let content = '';
   let reasoning = '';
