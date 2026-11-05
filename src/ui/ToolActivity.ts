@@ -1,3 +1,6 @@
+import type { DiffResult } from './diff.js';
+import type { ExistingFileKind } from '../tools/utils.js';
+
 export type ToolActivityStatus =
   | 'validating'
   | 'awaiting_approval'
@@ -24,4 +27,8 @@ export interface ToolActivity {
   trimmed?: boolean;
   startTime?: number;
   autoApproved?: boolean;
+  /** write_file only: current-file state probed before the approval prompt. */
+  fileState?: ExistingFileKind;
+  /** write_file only: precomputed line diff of existing vs new content. */
+  diff?: DiffResult;
 }
