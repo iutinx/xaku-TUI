@@ -2,7 +2,7 @@
 
 A living record of everything discussed and built for xaku, the terminal workspace for chatting with, stress-testing, and reviewing local Ollama models. Keep this file updated as phases complete.
 
-Last updated: 2026-10-24 (Phase 9: safe /retry with in-flight tools, auto-approve modes + `t` hotkey, streaming markdown; 123 tests passing)
+Last updated: 2026-11-04 (test suite relocated from `src/` to `tests/` mirroring the source layout; 196 tests passing)
 
 ---
 
@@ -39,6 +39,7 @@ Last updated: 2026-10-24 (Phase 9: safe /retry with in-flight tools, auto-approv
 | Session log | JSONL files (`env-paths` app data dir) |
 | CLI parsing | commander |
 | SQLite | better-sqlite3 |
+| Line diff | `diff` (write_file approval previews, Phase 10) |
 | Testing | Vitest + `ink-testing-library` |
 
 Config resolution order: CLI flags → env (`XAKU_BASE_URL`, `XAKU_MODEL`) → defaults (`http://localhost:11434/v1`, temp `0.2`). No default model: if neither `-m` nor `XAKU_MODEL` is set, xaku quietly uses the first installed model at startup; the "not installed / switched" warning only appears when the user explicitly configured a missing model.
@@ -176,9 +177,9 @@ User feedback: *"the text format he is trying to apply does not work"* — model
 **Goal**: Automated and manual verification of all 7 spec §14 acceptance criteria.
 
 **New test files**:
-- `src/logger.test.ts` — 2 tests for crash-safe session logging (Check 4)
-- `src/commands/report.test.ts` — 3 tests for /export report structure and /stats consistency (Check 5)
-- `src/ui/theme.test.ts` — 5 tests for Unicode/plain symbol fallback (Check 7)
+- `tests/logger.test.ts` — 2 tests for crash-safe session logging (Check 4)
+- `tests/commands/report.test.ts` — 3 tests for /export report structure and /stats consistency (Check 5)
+- `tests/ui/theme.test.ts` — 5 tests for Unicode/plain symbol fallback (Check 7)
 
 **Theme.ts refactor**:
 - Exported `getSymbols()` and `isPlainMode()` functions for testability
@@ -212,7 +213,7 @@ User feedback: *"the text format he is trying to apply does not work"* — model
 **Goal**: Verify cross-platform path handling works correctly on Windows and document platform-specific considerations.
 
 **New test file**:
-- `src/tools/path.test.ts` — 10 tests for cross-platform path handling
+- `tests/tools/path.test.ts` — 10 tests for cross-platform path handling
 
 **Tests added**:
 1. Relative paths with forward slashes ✅
@@ -278,15 +279,80 @@ User feedback: *"the text format he is trying to apply does not work"* — model
 **Incidental fix**: `scripts/smoke.ts` and `scripts/tool-test.ts` still imported the pre-Phase-8 `src/ollama.js` path — updated to `src/model/ollama.js`. Re-verified live against Ollama: full tool round trip passes.
 
 **Tests**: 27 new (123 total, all passing):
-- `src/model/session.test.ts` — 6 tests: `fillMissingToolResults` identity/repair/ordering/custom-filler.
-- `src/commands/commands.test.ts` — 5 new: `/autoapprove` modes, bare show, invalid mode, `/auto` alias, palette filtering.
-- `src/ui/markdown.test.ts` — 14 new: 12 `preprocessStreaming` cases + 2 `ChatPanel` streaming renders.
-- `src/tools/executor.test.ts` — 2 new: `isReadOnly` classification the auto-approve modes depend on.
+- `tests/model/session.test.ts` — 6 tests: `fillMissingToolResults` identity/repair/ordering/custom-filler.
+- `tests/commands/commands.test.ts` — 5 new: `/autoapprove` modes, bare show, invalid mode, `/auto` alias, palette filtering.
+- `tests/ui/markdown.test.ts` — 14 new: 12 `preprocessStreaming` cases + 2 `ChatPanel` streaming renders.
+- `tests/tools/executor.test.ts` — 2 new: `isReadOnly` classification the auto-approve modes depend on.
 - Typecheck ✅, build ✅, `scripts/tool-test.ts` live round trip ✅.
+
+### Phase 10 — UI polish: collapsible tools, diff views, scrollback
+
+**1. Collapsible tool sections**:
+- `ToolPanel` gained a `compact` mode: terminal-state activities (`success`/`denied`/`skipped`/`cancelled`) collapse into per-outcome summary lines (`✔ 3 succeeded`, `↓ 1 skipped`, …) with an `[c] expand N collapsed` hint; anything actionable (`awaiting_approval`, `failed`, `running`) always stays expanded. Expanded mode shows a `[c] collapse N completed` hint when there's something to hide.
+- Toggle via **`c` hotkey** (active only while generating or a tool prompt is pending and activities exist — never steals the key from typing; Ink handlers don't consume, so idle-state single-letter hotkeys are impossible without swallowing input) or **`/compact`** slash command for idle toggling. State persists across turns; `/clear` resets it. Logged as `set_tool_compact`.
+
+**2. Diff views for `write_file`**:
+- New npm dep: `diff` v9 (bundled TS types; `diffLines`).
+- `probeExistingFile()` in `src/tools/utils.ts`: reads the target file's current content at activity-creation time (before the approval prompt) — workspace-bounded via `resolveWithinWorkspace`, capped at 200 KB; returns `new | existing | too-large | unreadable` (out-of-bounds reports `unreadable`, never leaking external state).
+- `src/ui/diff.ts` (new, pure): `computeDiffLines(old, new, maxLines=40)` → `{ lines: DiffLine[{type: add|del|ctx}], added, removed, unchanged, truncated }`; `formatDiffSummary()` → `new file (+N lines)` / `+A -R ~U` / `no changes`.
+- `ToolActivity` carries `fileState` + precomputed `diff` (computed once at creation — ToolPanel re-renders stay cheap). Approval preview now shows a colored line diff (`+` green / `-` red / `|` muted) instead of a content dump; new files render all-additions; too-large/unreadable fall back to the old 300-char content preview with a note. Diff capped at 40 lines with `… and N more lines` footer (counts stay exact).
+- Known cosmetic quirk: a file missing its trailing newline shows the last line as del+add pair (diffLines tokenizes line terminators with the preceding text).
+
+**3. Scrollback**:
+- New `src/ui/useScrollback.ts`: bottom-anchored `offset` state (0 = live tail), pure helpers `computeMessageWindow/ clampOffset/ maxOffset/ computePageSize`. Page size is **dynamic from terminal height**: `floor((termRows − 4) / 3)` (24 rows → 6 messages/page), re-derived on resize.
+- Chat windowing now slices `[start, end)` from the offset instead of the old fixed last-12 tail; `MAX_VISIBLE_MESSAGES` (12) moved to `useScrollback.ts`. Keys stay absolutely indexed (`key={start + i}`) so React never remounts message rows.
+- Keys: **↑/↓ step 1, PgUp/PgDn page** — handled in the app-level `useInput`, active during generation/tool-prompt/connection-error *and* when idle with empty input (`scrollActive`). Home/End were dropped: Ink 5 exposes no `key.home`/`key.end` flags (verified in `parse-keypress.js`). **Esc** returns to the live tail *before* it cancels (scrolled → exit scroll; at tail → cancel as before). Typing any character also exits scroll mode (effect on `input`), and sending a message (`generate()`) snaps back to the tail. While scrolled up the streaming partial block is hidden (it lives at the tail).
+- Auto-follow semantics: at offset 0 the view is bottom-anchored, so new messages appear naturally; while scrolled up, an internal `delta` adjustment grows the offset as history extends, keeping the same messages on screen.
+- Indicators: scrolled → cyan banner `↑ N earlier · M newer — Esc to return`; at tail with hidden history → `… N earlier messages (in session log · ↑ to scroll)`; idle placeholder gains `↑/PgUp to scroll` once history exceeds the window.
+
+**New script**: `scripts/ui-demo.tsx` — manual visual check for diff preview + compact/collapsed panels (like `md-demo.tsx`).
+
+**Tests**: 46 new (169 total, all passing):
+- `tests/ui/useScrollback.test.ts` — 9: page-size math (24→6, 40→12, floor 1), clamps, window positions at offsets.
+- `tests/ui/diff.test.ts` — 12: add/del/modify/identical/empty/new classification, truncation counts, custom caps, summary formatting.
+- `tests/tools/utils.test.ts` — 6: probe existing/new/too-large/directory/outside-workspace/nested.
+- `tests/ui/toolpanel.test.ts` — 10: compact summary lines, pending stays expanded, collapse/expand hints, diff header+gutters+new-file label+too-large fallback+truncation footer.
+- `tests/ui/chatpanel.test.ts` — 7: tail windowing, fit-all, offset moves window, scroll banner counts, partial hidden while scrolled, auto-follow at tail.
+- `tests/commands/commands.test.ts` — 2: `/compact` parses to toggle, palette filtering.
+- Typecheck ✅, build ✅, headless boot ✅, live probe+diff round-trip against real files ✅ (`existing`/`new`/`escape` all classified correctly).
+
+### Phase 11 — UX power-user: batch tool approval, benchmarking, session replay
+
+**1. Batch tool approval + parallel execution** (was: strictly sequential loop):
+- `pendingApproval: string | null` → `pendingBatch: string[]` + `focusedActivity: string | null` in `app.tsx`.
+- The tool processing in `resumeGeneration()` is now two phases:
+  - *Approval*: auto-approve items resolve immediately; all manual items wait together via `Promise.all` on their resolvers. Hotkeys: `a`/`d` = approve/deny the whole batch, `1-9` = focus one item (its preview is already expanded; `a`/`d` then act on it alone, `Esc` back to batch), `t` = cycle auto-approve — newly-covered pending tools are released instantly.
+  - *Execution*: approved tools run concurrently via `Promise.all(executeToolActivity)`. Each keeps its own AbortController, so `Esc` still cancels mid-flight; results are appended to history **in original tool_calls order** regardless of completion order.
+- Approval UI: ToolPanel numbers pending rows (`[1] ⠋ read_file …`), highlights the focused row (inverted cyan), and shows context hints — batch: `[a] approve all [d] deny all [1-N] review [t] auto-approve`; focused: `[a] approve [d] deny [Esc] back`; single: same as before. Input-line placeholder mirrors the state.
+- **Behavior fix piggy-backed**: invalid (failed validation) calls now PAUSE the turn (`return`) instead of letting the loop continue with dangling `tool_calls` into the next request (which the API rejects); the user resolves them via `f`/`s`/`r` as the spec intends.
+- **Real bug fixed along the way**: cancellation never actually aborted the HTTP stream — `streamCompletion` had no signal (Phase 6's "AbortController plumbed" claim only worked for tools + state). Added `signal` support via the OpenAI SDK request options; the catch now recognizes both `AbortError` and the SDK's `APIUserAbortError`.
+
+**2. Model benchmarking (`/benchmark <case> [model,model,…]`)**:
+- `src/model/benchmark.ts`: `runBenchmark(models, options)` — sequential per-model runs (fairness: same case, system prompt, temperature, workspace, tool defs; auto-approval forced internally since there's no human). Each run loops `streamCompletion` + parallel tool execution up to 8 turns, accumulating: total time, prompt/completion tokens, tok/s, tool call/success/fail counts, avg tool duration, response length, turns. Per-model failures become `status: 'error'` rows; pre-aborted models are skipped rows.
+- UI: `/benchmark` replaces the chat area with `BenchmarkPanel` — header shows test case + progress (`⠋ Running 2/3: qwen3:8b… (Esc to cancel)`), table below with one row per completed model, columns Model/Time/Tok-s/Tools/Ok-Fail/Tool ms/Len; best tok/s row is green; error rows show the failure inline. Results stream in as models finish; `Esc` aborts via AbortController; finished views close on `Esc` or any typing.
+- Command parses optional comma-separated model list; without one, benchmarks all installed models (`/api/tags`). Missing case file → usage hint mentioning `/save`.
+- Verified live against real Ollama (qwen3:4b, read_file round trip: 2 turns, 1 tool, 425 tokens, 21 tok/s) and abort (SIGKILL at 800 ms → error row).
+
+**3. Session replay (`/replay [index]`)**:
+- `src/model/replay.ts` (pure, tested): `parseSessionLog` (skips malformed lines), `listSessions` (scans `logsDir` for `session-*.jsonl`, reads `session_start` for model/workspace/timestamp, newest first), `loadSession`, and `reconstructUpTo(events, index)` — walks the log building a display-faithful snapshot: messages (user/assistant with tool_calls/tool), per-turn tool activities with statuses, and settings evolution (`set_model`/`set_temperature`/`set_system_prompt`/`clear`).
+- **Log enrichment for correlation**: `tool_call`, `tool_auto_approved`, `tool_denied`, `tool_cancelled`, `tool_error`, `tool_success`, `tool_choice` events now carry `toolCallId`; `tool_success` also logs a 4000-char `output` cap (the log finally records what the model actually saw). Reconstruction matches results by `toolCallId` first, falling back to last-non-terminal-with-same-tool for older logs.
+- UI: `/replay` opens a `SessionPicker` (numbered list like CommandMenu: date · model · workspace · event count); `/replay 2` opens directly. Play view reuses ChatPanel + ToolPanel fed by the reconstructed snapshot with a header line (`Replay · file · event i/N · ←/→ step · PgUp/PgDn jump · Esc exit`). Step-through only (per review): ←/→ one event, PgUp/PgDn to ends, `Esc` exits and restores the live session. All other keys are swallowed during replay; input line is disabled.
+- Replay is display-only: pending calls are shown as pending (no synthetic results), approvals are never executed, nothing mutates.
+- Verified live against 57 real session logs in the app-data dir.
+
+**Tests**: 27 new (196 total, all passing):
+- `tests/model/replay.test.ts` — 11: parse (skips bad lines), reconstruction at cursors, settings evolution, clear, generation_cancelled, legacy name-matching fallback, pending stays pending, listSessions ordering/robustness, loadSession.
+- `tests/model/benchmark.test.ts` — 4 (mocked OpenAI client): metric accumulation + multi-model, tool execution turns + duration tracking, error rows on model failure, pre-abort skip rows.
+- `tests/ui/benchmark.test.ts` — 5: BenchmarkPanel table rows/progress/error row, SessionPicker list + hint.
+- `tests/ui/toolpanel.test.ts` — 3 new: multi-pending batch hint + number badges, focused hint, single-pending wording.
+- `tests/commands/commands.test.ts` — 4 new: `/benchmark` with/without models/no name, `/replay` bare/indexed/invalid.
+- Live verifications: benchmark + abort against real Ollama; replay against real logs; headless render smoke.
+
+**Known-untested (flag for a manual TTY pass)**: interactive batch-approval flow (type prompt → 2 tool calls → `[1]` review → `a`) inside a real terminal — the scripted PTY harness proved flaky in this environment (frames intermittently not rendered by the harness, unrelated to app code; unit + render tests cover the logic). Verify once manually with `npm run dev`.
 
 ## 5. Current State
 
-**Working & verified** (typecheck ✅, 123 tests ✅, PTY smoke ✅, real Ollama ✅ with qwen3:4b, spec §14 harness ✅):
+**Working & verified** (typecheck ✅, 196 tests ✅, PTY smoke ✅, real Ollama ✅ with qwen3:4b, spec §14 harness ✅):
 - Fullscreen TUI: top bar, chat with live streaming + reasoning display, input with cursor/editing, stats bar pinned to the bottom.
 - Responsive resize: expand/widen/shrink repaints cleanly.
 - Streaming chat via Ollama; tok/s + context counters; connection status with retry.
@@ -294,7 +360,7 @@ User feedback: *"the text format he is trying to apply does not work"* — model
 - Session logging (JSONL, crash-safe) with proper `session_end` on exit.
 - All five tools: `read_file`, `list_dir`, `write_file`, `run_shell`, `query_db` — with workspace boundary (path + realpath), approval flow, fix/skip/retry choices.
 - Cancellation: `/cancel` or `Esc` aborts in-flight generation AND running shell/database tools via per-tool `AbortController`.
-- All nine slash commands: `/model`, `/temperature`, `/system`, `/clear`, `/retry`, `/stats`, `/export`, `/save`, `/load` — plus `/autoapprove` (alias `/auto`) from Phase 9.
+- All nine slash commands: `/model`, `/temperature`, `/system`, `/clear`, `/retry`, `/stats`, `/export`, `/save`, `/load` — plus `/autoapprove` (alias `/auto`, Phase 9) and `/compact` (Phase 10).
 - Command autocomplete palette with filtering, aliases, keyboard nav.
 - Tool error flow: `fix` feeds error back to model, `retry` re-executes and resumes, `skip` sends skip message — all logged.
 - Markdown rendering for assistant messages: headings, bold/italic, inline code, code blocks with syntax highlighting, lists, blockquotes, tables, links, images (as `[image: alt]`), strikethrough — plus LaTeX stripping with Unicode symbol substitution.
@@ -303,38 +369,44 @@ User feedback: *"the text format he is trying to apply does not work"* — model
 - Safe `/retry` / cancel / fix-skip-retry with in-flight tools: generation-epoch guard stops stale loops from clobbering state; dangling tool calls are auto-filled before any new request (old turns kept as context).
 - Auto-approve modes (`none` / `read-only` / `all`) via `--auto-approve`, `XAKU_AUTO_APPROVE`, `/autoapprove`, and the `[t]` hotkey; TopBar/ToolPanel indicators; all decisions logged.
 - Live streaming markdown: partial output renders through the markdown pipeline with `preprocessStreaming` closing unclosed fences/spans/emphasis.
+- Collapsible tool panel: `c` hotkey / `/compact` collapses completed activities to per-outcome summaries; actionable ones always stay expanded.
+- `write_file` approval previews show a colored line diff (capped 40 lines, exact counts, new-file and too-large fallbacks); existing content probed workspace-safely before prompting.
+- Scrollback: ↑/↓/PgUp/PgDn browse message history (dynamic page size from terminal height); auto-follow at the tail, position preserved while scrolled; Esc returns to the live view before it cancels.
+- Batch tool approval: multiple concurrent tool calls prompt together — `[a]/[d]` for the whole batch, `1-9` to review one, `t` releases newly-covered pending tools instantly; approved tools execute in parallel with results returned in tool_calls order.
+- Model benchmarking: `/benchmark <case> [models]` runs a saved test case across models with auto-approval, streams a live comparison table (time, tok/s, tools, ok/fail, tool ms, length), Esc cancels, failures become inline error rows.
+- Session replay: `/replay` picks from past session logs (or `/replay <index>`), step-through playback (←/→ events, PgUp/PgDn ends, Esc exits) reusing ChatPanel/ToolPanel; logs now carry `toolCallId` on all tool events plus capped output on success.
 
 **Pending**:
-- Windows manual verification (all 123 tests + install flow on a real Windows box; CI Windows runner recommended).
+- Manual TTY pass for the interactive batch-approval flow (scripted PTY harness flaky in this environment; logic covered by 196 automated tests).
+- Windows manual verification (all 196 tests + install flow on a real Windows box; CI Windows runner recommended).
 - Cross-platform CI (GitHub Actions matrix: macOS/Windows/Linux).
+- Animated per-activity spinners in ToolPanel (status icon is static `⠋`; animation would need a frame ticker like StatsBar).
 
 ## 6. Later (designed for, per spec §15)
-- Side-by-side model comparison (keep session/log model-agnostic).
+- Side-by-side model comparison: two models answering the same prompt in parallel split view (sequential variant now covered by `/benchmark`; live parallel sessions still to design).
 - Custom tool-call format checkers; more DB types.
-- UI polish roadmap (agreed to defer until core is done): collapsible tool sections, diff views, scrollback.
+- UI polish roadmap: collapsible tool sections, diff views, scrollback (all shipped in Phase 10); remaining: message-level scrollback within very long messages, per-activity animated spinners, replay playback speed control.
 
 ## 7. Reference: File Map
 
 ```
 src/
-  app.tsx              # state machine: chat loop, tool approvals, auto-approve modes, commands, hotkeys, cancellation, generation-epoch guard
+  app.tsx              # state machine: chat loop, batch tool approvals, auto-approve modes, benchmark & replay modes, commands, hotkeys, cancellation, generation-epoch guard, scrollback routing
   cli.tsx              # entry, alt-screen takeover, flags
   config.ts            # flags/env/defaults → Config (workspace, limits, paths, autoApprove)
   logger.ts            # JSONL session log
-  logger.test.ts       # 2 tests (spec §14 Check 4)
   commands/            # Slash command system
     index.ts           # Command registry + parser (previously src/commands.ts)
-    commands.test.ts   # 19 tests
     cases.ts           # /save & /load test case persistence
     report.ts          # /export: Markdown + JSON report builder
-    report.test.ts     # 3 tests (spec §14 Check 5)
   model/               # Model connection layer
-    ollama.ts          # Streaming client, model list, /api/show tool-support
+    ollama.ts          # Streaming client (abort-signal aware), model list, /api/show tool-support
     session.ts         # Message types, token estimation, fillMissingToolResults (dangling-call repair)
-    session.test.ts    # 6 tests
+    benchmark.ts       # Sequential multi-model benchmark runner with metrics accumulation
+    replay.ts          # JSONL session log parsing + display reconstruction for replay
   tools/               # Tool engine
     types.ts           # ErrorLabel, ToolResult, ToolContext
-    utils.ts           # resolveWithinWorkspace (path+realpath), trimOutput
+    utils.ts           # resolveWithinWorkspace (path+realpath), trimOutput, probeExistingFile (diff pre-read, 200KB cap)
     registry.ts        # tool defs (read_file, list_dir, write_file, run_shell, query_db) + isReadOnly flags
     read_file.ts       # + workspace boundary, trimming
     list_dir.ts
@@ -342,29 +414,57 @@ src/
     run_shell.ts       # + timeout, output cap, cross-platform
     query_db.ts        # + better-sqlite3 read-only
     executor.ts        # validate / execute / getToolDefinitions
-    executor.test.ts   # 23 tests
   ui/                  # UI components
     theme.ts           # listr2-style symbols + unicode/plain fallback
-    theme.test.ts      # 5 tests (spec §14 Check 7)
     MarkdownText.tsx   # marked lexer → Ink renderers + cleanLatex + preprocessStreaming
     code-highlight.ts  # highlight.js → CodeSegment[] with scope→color map + line splitter
-    markdown.test.ts   # 55 tests
+    diff.ts            # computeDiffLines/formatDiffSummary over `diff` pkg (40-line cap, exact counts)
+    useScrollback.ts   # bottom-anchored offset, dynamic page size from termRows, window math
     TopBar.tsx  ChatPanel.tsx  InputLine.tsx  StatsBar.tsx
     CommandMenu.tsx  ToolPanel.tsx  ToolActivity.ts
+    BenchmarkPanel.tsx  SessionPicker.tsx
+tests/                 # Vitest suite, mirrors src/ layout (moved out of src/ 2026-11-04)
+  logger.test.ts       # 2 tests (spec §14 Check 4)
+  commands/
+    commands.test.ts   # 25 tests
+    report.test.ts     # 3 tests (spec §14 Check 5)
+  model/
+    session.test.ts    # 6 tests
+    benchmark.test.ts  # 4 tests (mocked client)
+    replay.test.ts     # 11 tests
+  tools/
+    executor.test.ts   # 23 tests
+    path.test.ts       # 10 tests (cross-platform path handling)
+    utils.test.ts      # 6 tests
+  ui/
+    theme.test.ts      # 5 tests (spec §14 Check 7)
+    markdown.test.ts   # 55 tests
+    toolpanel.test.ts  # 13 tests (compact mode, diff render, batch approval UI)
+    chatpanel.test.ts  # 7 tests (scrollback windowing)
+    diff.test.ts       # 12 tests
+    useScrollback.test.ts # 9 tests
+    benchmark.test.ts  # 5 tests (BenchmarkPanel + SessionPicker render)
 scripts/
   smoke.ts             # manual: chat round-trip
   tool-test.ts         # manual: model→validate→execute→feedback
   md-demo.tsx          # manual: render sample markdown/LaTeX through <MarkdownText/>
+  ui-demo.tsx          # manual: render diff preview + compact/collapsed ToolPanel states
   acceptance.ts        # spec §14 acceptance test harness (5 automated, 2 manual)
 MANUAL_TESTS.md        # step-by-step procedures for manual acceptance checks
 ```
 
 ## 8. Change Log (append new entries at top)
 
+- **2026-11-04** — Test suite relocation. All 16 `*.test.ts` files moved out of `src/` into a top-level `tests/` folder mirroring the source layout (`tests/commands/`, `tests/model/`, `tests/tools/`, `tests/ui/`) — source folders now contain shipped code only. Every relative import rewritten to the `../../src/...` form; hard-coded test paths in `scripts/acceptance.ts` updated; `MANUAL_TESTS.md` and the §7 file map refreshed. No config changes needed: Vitest's default discovery covers `tests/**/*.test.ts`, and `tsconfig.json` already excluded `**/*.test.ts` from the build, so `dist/` output is unchanged. Bonus: added `tsconfig.test.json` + `npm run typecheck:tests` so the suite is now type-checked too (previously it never was) — surfaced and fixed one dead `mkdir` import in `tests/model/replay.test.ts`. 196 tests still passing; typecheck ✅ build ✅ acceptance harness ✅.
+
+- **2026-10-29** — Phase 11: UX power-user features. (1) **Batch tool approval + parallel execution**: `pendingApproval` became `pendingBatch` + `focusedActivity`; all manual tool calls in a turn prompt together (`a`/`d` act on the whole batch, `1-9` focuses one row for individual review, `t` releases newly-covered pending tools instantly); approved tools run concurrently via `Promise.all` with results fed back in original tool_calls order. Piggy-back fix: invalid calls now pause the turn for `f`/`s`/`r` instead of racing ahead with dangling `tool_calls` (API-rejected request bug). **Real bug found & fixed**: `streamCompletion` never had an abort signal — Esc-cancel and `/cancel` never actually aborted the HTTP stream; added `signal` via SDK request options, recognizing both `AbortError` and `APIUserAbortError`. (2) **Model benchmarking** (`/benchmark <case> [models]`): `src/model/benchmark.ts` runs a saved test case across models sequentially (same prompt/system/temp/workspace/tools, forced auto-approval), accumulating time/tokens/tok-s/tool-success-fail/avg-tool-ms/response-length/turns; live in-UI comparison table (`BenchmarkPanel`) replaces the chat area, best tok/s green, error rows inline, `Esc` aborts mid-run, results stream in per model. Verified live against real Ollama + mid-stream SIGABORT. (3) **Session replay** (`/replay [index]`): `src/model/replay.ts` parses `session-*.jsonl` logs (malformed-line-tolerant), `listSessions` builds a newest-first catalog from `session_start` metadata, `reconstructUpTo` rebuilds messages/activities/settings at any event cursor (toolCallId-correlated, legacy name-fallback matching); step-through viewer reuses ChatPanel+ToolPanel (←/→ step, PgUp/PgDn ends, Esc exit, keys swallowed while in replay). **Log enrichment**: all tool events now carry `toolCallId`, `tool_success` logs a 4000-char output cap so replays/exports can show what the model saw. Verified against 57 real session files. 27 new tests (196 total passing); typecheck ✅ build ✅; interactive batch-approval flow pending one manual TTY pass (scripted PTY harness flaky in this env, not an app issue — headless render smoke confirms the tree mounts).
+
+- **2026-10-24 (later, 5)** — Phase 10: UI polish (the §6 deferred trio). (1) **Collapsible tool panel**: `ToolPanel` compact mode groups terminal activities into per-outcome summary lines while keeping actionable ones expanded; `c` hotkey (generation/prompt states only — Ink handlers don't consume keys, so idle hotkeys would steal input) + `/compact` command; `[c] collapse/expand` hints; reset on `/clear`. (2) **`write_file` diff views**: new `diff` v9 dep; `probeExistingFile()` reads the target pre-approval (workspace-bounded, 200 KB cap, `new|existing|too-large|unreadable`); pure `src/ui/diff.ts` computes capped-at-40 colored line diffs with exact counts once at activity creation; approval preview shows `+`/`-`/`|` lines instead of a content dump; new files labeled `new file (+N lines)`; too-large falls back to content preview with a note. (3) **Scrollback**: `src/ui/useScrollback.ts` — bottom-anchored offset, `computeMessageWindow`, dynamic page size from live `termRows` (`(rows−4)/3`); ChatPanel renders offset windows with stable keys; ↑/↓/PgUp/PgDn routed app-side (active during generation/prompts AND idle-empty input; Home/End impossible — Ink 5 has no key flags for them); Esc exits scroll before it cancels; typing or sending snaps back to tail; auto-follow at offset 0, position-preserving offset growth while scrolled; partial block hidden while browsing; `↑ to scroll` discoverability hints in banner/placeholder. New `scripts/ui-demo.tsx`. 46 tests added (169 total passing); typecheck ✅ build ✅ headless boot ✅ live probe/diff ✅.
+
 - **2026-10-24 (later, 4)** — Phase 9: cleared the three long-standing pending items. (1) **Safe `/retry` / cancellation**: `cleanupGeneration()` extracted from `cancelGeneration()` — aborts stream + tools, resolves stuck approval promises, and bumps a `generationEpochRef` that every `resumeGeneration` loop checks at four points (loop top, after stream, after approval, guarded `finally`), so stale loops can no longer clobber a new turn or hang forever; `/retry` (and fix/skip/retry) clean up before regenerating, keeping old assistant/tool turns as context; new `fillMissingToolResults()` in `session.ts` repairs dangling `tool_calls` (assistant messages without matching tool results) before any request reaches the API. (2) **Auto-approve modes (spec §15)**: `Config.autoApprove` (`none`/`read-only`/`all`) via `--auto-approve` flag or `XAKU_AUTO_APPROVE` env; `/autoapprove` + `/auto` slash commands; **`[t]` hotkey** cycles modes during generation and immediately releases a pending tool that the new mode covers; leverages the existing `isReadOnly` tool flags; TopBar `auto:<mode>` indicator, ToolPanel `auto-approved` lines, `tool_auto_approved` / `set_auto_approve` log events. (3) **Streaming markdown**: live `partial` now renders through `<MarkdownText />` — `preprocessStreaming()` closes unclosed code fences, inline code, bold, strikethrough, and link parens (odd-count detection, markers inside complete spans ignored); cursor moved inline into the markdown so no pop-to-new-row; `AssistantBlock` fixed to not nest Box in Text. Incidental: `scripts/smoke.ts` + `scripts/tool-test.ts` imports repaired (stale pre-Phase-8 `src/ollama.js` path) and re-verified live end-to-end against Ollama. 27 new tests (123 total, all passing); typecheck ✅, build ✅.
 
-- **2026-10-24 (later, 3)** — Phase 8.3: Windows Caution Pass. Added `src/tools/path.test.ts` with 10 tests for cross-platform path handling (forward slashes, backslashes, mixed separators, workspace boundaries, absolute paths, case-insensitivity, drive letters, long paths). Created `WINDOWS.md` with comprehensive Windows platform guide: installation, platform-specific features, known issues (process termination, file locking, path length, terminal rendering), manual testing procedures, troubleshooting, performance considerations. Key finding: existing `resolveWithinWorkspace` already handles Windows paths correctly via Node.js `path` module — no code changes required. 10 new tests (96 total, all passing).
-- **2026-10-24 (later, 2)** — Phase 8.2: Spec §14 Acceptance Harness. Automated verification for 5/7 acceptance checks (Checks 2, 3, 4, 5, 7), with manual test procedures documented for Checks 1 and 6 (require Ollama). New test files: `src/logger.test.ts` (2 tests for crash-safe session logging), `src/commands/report.test.ts` (3 tests for /export structure and /stats consistency), `src/ui/theme.test.ts` (5 tests for Unicode/plain symbol fallback). Refactored `src/ui/theme.ts` to export `getSymbols()` and `isPlainMode()` for testability. Added `scripts/acceptance.ts` harness that runs automated checks and documents manual procedures. Created `MANUAL_TESTS.md` with step-by-step procedures for all 7 checks, troubleshooting guide, and cross-platform testing instructions. 10 new tests (86 total, all passing).
+- **2026-10-24 (later, 3)** — Phase 8.3: Windows Caution Pass. Added `tests/tools/path.test.ts` with 10 tests for cross-platform path handling (forward slashes, backslashes, mixed separators, workspace boundaries, absolute paths, case-insensitivity, drive letters, long paths). Created `WINDOWS.md` with comprehensive Windows platform guide: installation, platform-specific features, known issues (process termination, file locking, path length, terminal rendering), manual testing procedures, troubleshooting, performance considerations. Key finding: existing `resolveWithinWorkspace` already handles Windows paths correctly via Node.js `path` module — no code changes required. 10 new tests (96 total, all passing).
+- **2026-10-24 (later, 2)** — Phase 8.2: Spec §14 Acceptance Harness. Automated verification for 5/7 acceptance checks (Checks 2, 3, 4, 5, 7), with manual test procedures documented for Checks 1 and 6 (require Ollama). New test files: `tests/logger.test.ts` (2 tests for crash-safe session logging), `tests/commands/report.test.ts` (3 tests for /export structure and /stats consistency), `tests/ui/theme.test.ts` (5 tests for Unicode/plain symbol fallback). Refactored `src/ui/theme.ts` to export `getSymbols()` and `isPlainMode()` for testability. Added `scripts/acceptance.ts` harness that runs automated checks and documents manual procedures. Created `MANUAL_TESTS.md` with step-by-step procedures for all 7 checks, troubleshooting guide, and cross-platform testing instructions. 10 new tests (86 total, all passing).
 - **2026-10-24 (later)** — Phase 8.1: Tool cancellation. Added optional `abortSignal` to `ToolContext` and `cancelled` flag to `ToolResult`. `run_shell` listens for the signal, SIGTERMs the child process, escalates to SIGKILL after 1s. `query_db` checks the signal at three points (before open, before/after `all()`). New `toolControllersRef` map in `app.tsx` tracks active controllers; `cancelGeneration()` now aborts them too and marks their activities `'cancelled'`. Added `'cancelled'` status to `ToolActivity` and rendering in `ToolPanel`. 3 new tests (76 total).
 - **2026-10-24** — Source reorganization. Root `src/` had 10 files; grouped into subfolders for clarity:
   - `src/commands/` — new folder containing `index.ts` (was `commands.ts`), `commands.test.ts`, `cases.ts`, `report.ts`
