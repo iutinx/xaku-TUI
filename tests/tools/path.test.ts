@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
-import { resolveWithinWorkspace } from './utils.js';
+import { resolveWithinWorkspace } from '../../src/tools/utils.js';
 
 describe('Cross-Platform Path Handling', () => {
   let workspace: string;

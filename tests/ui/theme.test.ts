@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { getSymbols, isPlainMode } from './theme.js';
+import { getSymbols, isPlainMode } from '../../src/ui/theme.js';
 
 describe('Spec §14 Acceptance: Symbol Fallback', () => {
   const originalEnv = { ...process.env };

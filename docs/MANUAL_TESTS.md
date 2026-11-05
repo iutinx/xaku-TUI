@@ -124,7 +124,7 @@ This document describes manual testing procedures for acceptance checks that req
 
 ```bash
 # Run unit tests
-npx vitest run src/ui/theme.test.ts
+npx vitest run tests/ui/theme.test.ts
 ```
 
 Expected: All tests pass, verifying ASCII symbol rendering.

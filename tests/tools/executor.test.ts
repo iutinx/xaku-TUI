@@ -3,9 +3,9 @@ import { mkdtemp, writeFile, mkdir, rm, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import Database from 'better-sqlite3';
-import { executeToolCall, validateToolCall } from './executor.js';
-import { tools } from './registry.js';
-import type { ToolCall, ToolContext } from './types.js';
+import { executeToolCall, validateToolCall } from '../../src/tools/executor.js';
+import { tools } from '../../src/tools/registry.js';
+import type { ToolCall, ToolContext } from '../../src/tools/types.js';
 
 describe('Tool Engine', () => {
   let workspace: string;

@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { render } from 'ink-testing-library';
 import React from 'react';
-import { cleanLatex, isMathLike, MarkdownText, preprocessStreaming } from './MarkdownText.js';
-import { ChatPanel } from './ChatPanel.js';
-import { highlightCode, splitSegmentsIntoLines } from './code-highlight.js';
+import { cleanLatex, isMathLike, MarkdownText, preprocessStreaming } from '../../src/ui/MarkdownText.js';
+import { ChatPanel } from '../../src/ui/ChatPanel.js';
+import { highlightCode, splitSegmentsIntoLines } from '../../src/ui/code-highlight.js';
 
 describe('cleanLatex', () => {
   it('strips inline $ ... $ delimiters', () => {

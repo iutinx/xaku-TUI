@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
-import { exportSession, type ExportStats } from './report.js';
+import { exportSession, type ExportStats } from '../../src/commands/report.js';
 
 describe('Spec §14 Acceptance: /export Report', () => {
   let tempDir: string;

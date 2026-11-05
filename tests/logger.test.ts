@@ -3,7 +3,7 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
-import { createLogger } from './logger.js';
+import { createLogger } from '../src/logger.js';
 
 describe('Spec §14 Acceptance: Session Logging', () => {
   let tempDir: string;

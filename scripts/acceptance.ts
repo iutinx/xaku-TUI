@@ -37,7 +37,7 @@ function recordResult(name: string, status: 'pass' | 'fail' | 'manual' | 'skip',
 async function runUnitTests() {
   log('\n📋 Running unit tests for automated checks...\n');
   try {
-    execSync('npx vitest run src/logger.test.ts src/commands/report.test.ts src/ui/theme.test.ts src/tools/executor.test.ts', {
+    execSync('npx vitest run tests/logger.test.ts src/commands/report.test.ts src/ui/theme.test.ts src/tools/executor.test.ts', {
       stdio: 'pipe'
     });
     return true;
@@ -55,7 +55,7 @@ async function checkMalformedToolCalls() {
   // - Schema validation failures
   // - Unknown tool names
   try {
-    execSync('npx vitest run src/tools/executor.test.ts', { stdio: 'pipe' });
+    execSync('npx vitest run tests/tools/executor.test.ts', { stdio: 'pipe' });
     recordResult('Malformed tool call labeling', 'pass', 'Covered by unit tests');
   } catch {
     recordResult('Malformed tool call labeling', 'fail', 'Unit tests failed');
@@ -68,7 +68,7 @@ async function checkWorkspaceBoundary() {
   
   // Covered by executor.test.ts which tests path resolution
   try {
-    execSync('npx vitest run src/tools/executor.test.ts', { stdio: 'pipe' });
+    execSync('npx vitest run tests/tools/executor.test.ts', { stdio: 'pipe' });
     recordResult('Workspace boundary enforcement', 'pass', 'Covered by unit tests');
   } catch {
     recordResult('Workspace boundary enforcement', 'fail', 'Unit tests failed');
@@ -80,7 +80,7 @@ async function checkCrashSafeLogging() {
   log('   Running logger tests...');
   
   try {
-    execSync('npx vitest run src/logger.test.ts', { stdio: 'pipe' });
+    execSync('npx vitest run tests/logger.test.ts', { stdio: 'pipe' });
     recordResult('Crash-safe session logging', 'pass', 'Verified by unit tests');
   } catch {
     recordResult('Crash-safe session logging', 'fail', 'Unit tests failed');
@@ -92,7 +92,7 @@ async function checkExportStatsConsistency() {
   log('   Running export tests...');
   
   try {
-    execSync('npx vitest run src/commands/report.test.ts', { stdio: 'pipe' });
+    execSync('npx vitest run tests/commands/report.test.ts', { stdio: 'pipe' });
     recordResult('Export/stats consistency', 'pass', 'Verified by unit tests');
   } catch {
     recordResult('Export/stats consistency', 'fail', 'Unit tests failed');
@@ -117,7 +117,7 @@ async function checkSymbolFallback() {
   log('   Running theme tests...');
   
   try {
-    execSync('npx vitest run src/ui/theme.test.ts', { stdio: 'pipe' });
+    execSync('npx vitest run tests/ui/theme.test.ts', { stdio: 'pipe' });
     recordResult('Symbol fallback (XAKU_PLAIN=1)', 'pass', 'Verified by unit tests');
     log('   Manual verification: XAKU_PLAIN=1 npm run dev');
   } catch {

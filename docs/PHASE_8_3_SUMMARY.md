@@ -6,7 +6,7 @@ Phase 8.3 focused on ensuring xaku works correctly on Windows platforms through 
 
 ## Changes Made
 
-### 1. New Test File: `src/tools/path.test.ts`
+### 1. New Test File: `tests/tools/path.test.ts`
 
 **Purpose**: Verify cross-platform path handling works correctly on Windows, macOS, and Linux.
 
@@ -131,7 +131,7 @@ The codebase already handles platform differences correctly:
 ## Files Changed
 
 ### New Files (2)
-- `src/tools/path.test.ts` - 10 cross-platform path tests
+- `tests/tools/path.test.ts` - 10 cross-platform path tests
 - `WINDOWS.md` - Windows platform guide
 
 ### Modified Files (2)

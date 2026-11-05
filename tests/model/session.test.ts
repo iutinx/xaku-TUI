@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fillMissingToolResults, type ConversationMessage } from './session.js';
+import { fillMissingToolResults, type ConversationMessage } from '../../src/model/session.js';
 
 function toolCall(id: string): ConversationMessage {
   return {
