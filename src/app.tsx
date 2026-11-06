@@ -1,5 +1,5 @@
 import { Box, Text, useInput, useStdout } from 'ink';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Config, AutoApproveMode } from './config.js';
 import { AUTO_APPROVE_MODES } from './config.js';
 import {
@@ -10,13 +10,14 @@ import {
   type ToolCallInProgress,
 } from './model/ollama.js';
 import { parseCommand } from './commands/index.js';
-import { estimateContextTokens, estimateTokens, fillMissingToolResults, type ConversationMessage, type UserMessage } from './model/session.js';
+import { estimateContextTokens, estimateTokens, fillMissingToolResults, toOpenAIMessages, type ConversationMessage, type UserMessage } from './model/session.js';
 import { createLogger } from './logger.js';
 import { exportSession } from './commands/report.js';
 import { saveTestCase, loadTestCase } from './commands/cases.js';
 import { runBenchmark, type BenchmarkResult } from './model/benchmark.js';
 import { BenchmarkPanel } from './ui/BenchmarkPanel.js';
 import { listSessions, loadSession, reconstructUpTo, type LogEvent, type SessionSummary } from './model/replay.js';
+import { formatReplaySpeed, nextSpeed, replayIntervalMs } from './ui/replay-controls.js';
 import { SessionPicker } from './ui/SessionPicker.js';
 import { ChatPanel } from './ui/ChatPanel.js';
 import { InputLine } from './ui/InputLine.js';
@@ -24,7 +25,7 @@ import { StatsBar } from './ui/StatsBar.js';
 import { TopBar } from './ui/TopBar.js';
 import { ToolPanel } from './ui/ToolPanel.js';
 import type { ToolActivity } from './ui/ToolActivity.js';
-import { useScrollback, MAX_VISIBLE_MESSAGES } from './ui/useScrollback.js';
+import { useScrollback } from './ui/useScrollback.js';
 import { validateToolCall, executeToolCall, getToolDefinitions } from './tools/executor.js';
 import { tools } from './tools/registry.js';
 import { probeExistingFile, type ExistingFileKind } from './tools/utils.js';
@@ -45,7 +46,7 @@ interface BenchmarkState {
 
 type ReplayState =
   | { view: 'picker'; sessions: SessionSummary[]; selected: number }
-  | { view: 'play'; fileName: string; events: LogEvent[]; cursor: number };
+  | { view: 'play'; fileName: string; events: LogEvent[]; cursor: number; speed: number; playing: boolean };
 
 export default function App({ config }: AppProps) {
   const client = useMemo(() => createClient(config.baseUrl), [config.baseUrl]);
@@ -99,6 +100,7 @@ export default function App({ config }: AppProps) {
   const [bench, setBench] = useState<BenchmarkState | null>(null);
   const benchControllerRef = useRef<AbortController | null>(null);
   const [replay, setReplay] = useState<ReplayState | null>(null);
+  const [chatHeights, setChatHeights] = useState({ contentHeight: 0, containerHeight: 0 });
 
   function setAutoApprove(mode: AutoApproveMode) {
     autoApproveRef.current = mode;
@@ -151,7 +153,35 @@ export default function App({ config }: AppProps) {
     };
   }, [stdout]);
 
-  const scrollback = useScrollback(messages.length, termRows);
+  const maxScrollLine = Math.max(0, chatHeights.contentHeight - chatHeights.containerHeight);
+  const scrollback = useScrollback(maxScrollLine, Math.max(1, chatHeights.containerHeight), chatHeights.contentHeight);
+
+  const handleChatMeasured = useCallback((heights: { contentHeight: number; containerHeight: number }) => {
+    setChatHeights(heights);
+  }, []);
+
+  // Trackpad/mouse wheel: 3 rows per notch, same semantics as ↑/↓. Handled
+  // inside ChatPanel (which also routes clicks on reasoning headers).
+  const WHEEL_ROWS = 3;
+  function handleWheel(direction: 'up' | 'down') {
+    if (replay || bench) return;
+    if (direction === 'up') {
+      scrollback.up(WHEEL_ROWS);
+    } else {
+      scrollback.down(WHEEL_ROWS);
+    }
+  }
+
+  // Reasoning blocks are collapsed by default; this set holds the expanded ones.
+  const [expandedReasoning, setExpandedReasoning] = useState<Set<number>>(() => new Set());
+  const toggleReasoning = useCallback((index: number) => {
+    setExpandedReasoning((prev) => {
+      const next = new Set(prev);
+      if (next.has(index)) next.delete(index);
+      else next.add(index);
+      return next;
+    });
+  }, []);
 
   async function testConnection() {
     try {
@@ -217,13 +247,39 @@ export default function App({ config }: AppProps) {
         } else {
           const total = replay.events.length;
           if (key.rightArrow) {
-            setReplay({ ...replay, cursor: Math.min(total - 1, replay.cursor + 1) });
+            // Manual steps pause auto-play so the user can inspect.
+            setReplay({ ...replay, cursor: Math.min(total - 1, replay.cursor + 1), playing: false });
           } else if (key.leftArrow) {
-            setReplay({ ...replay, cursor: Math.max(0, replay.cursor - 1) });
+            setReplay({ ...replay, cursor: Math.max(0, replay.cursor - 1), playing: false });
           } else if (key.pageUp) {
-            setReplay({ ...replay, cursor: 0 });
+            setReplay({ ...replay, cursor: 0, playing: false });
           } else if (key.pageDown) {
-            setReplay({ ...replay, cursor: Math.max(0, total - 1) });
+            setReplay({ ...replay, cursor: Math.max(0, total - 1), playing: false });
+          } else if (char === '+' || char === '=') {
+            setReplay({ ...replay, speed: nextSpeed(replay.speed, 1), playing: true });
+          } else if (char === '-') {
+            setReplay({ ...replay, speed: nextSpeed(replay.speed, -1), playing: true });
+          } else if (char === ' ' || char === 'p') {
+            if (replay.playing) {
+              setReplay({ ...replay, playing: false });
+            } else {
+              const atEnd = replay.cursor >= total - 1;
+              setReplay({ ...replay, cursor: atEnd ? 0 : replay.cursor, playing: true });
+            }
+          }
+        }
+        return;
+      }
+
+      // Ctrl+T: show/hide the most recent model thinking — a keyboard fallback
+      // for the clickable `thinking [+/−]` header when terminal clicks don't
+      // reach us (non-SGR mice, odd coordinate bases).
+      if (key.ctrl && char === 't') {
+        for (let i = messages.length - 1; i >= 0; i--) {
+          const m = messages[i];
+          if (m.role === 'assistant' && m.reasoning) {
+            toggleReasoning(i);
+            break;
           }
         }
         return;
@@ -325,7 +381,7 @@ export default function App({ config }: AppProps) {
         testConnection();
       }
     },
-    { isActive: generating || hasToolPrompt || connectionError || scrollActive || bench !== null || replay !== null },
+    { isActive: generating || hasToolPrompt || connectionError || scrollActive || bench !== null || replay !== null || scrollback.isScrolled },
   );
 
   // Any typed character leaves scrollback and returns to the live tail.
@@ -509,7 +565,7 @@ export default function App({ config }: AppProps) {
         return;
       }
       logger.log({ event: 'replay_open', file: summary.fileName, events: events.length });
-      setReplay({ view: 'play', fileName: summary.fileName, events, cursor: 0 });
+      setReplay({ view: 'play', fileName: summary.fileName, events, cursor: 0, speed: 1, playing: false });
     } catch (err) {
       addSystemMessage(`Replay failed to load: ${err instanceof Error ? err.message : String(err)}`);
       setReplay(null);
@@ -520,6 +576,22 @@ export default function App({ config }: AppProps) {
     () => (replay?.view === 'play' ? reconstructUpTo(replay.events, replay.cursor) : null),
     [replay],
   );
+
+  const replayPlaying = replay?.view === 'play' && replay.playing;
+  const replaySpeed = replay?.view === 'play' ? replay.speed : 1;
+
+  // Auto-play: advance one event per interval while playing; pause at the end.
+  useEffect(() => {
+    if (!replayPlaying) return;
+    const id = setInterval(() => {
+      setReplay((prev) => {
+        if (prev?.view !== 'play' || !prev.playing) return prev;
+        if (prev.cursor >= prev.events.length - 1) return { ...prev, playing: false };
+        return { ...prev, cursor: prev.cursor + 1 };
+      });
+    }, replayIntervalMs(replaySpeed));
+    return () => clearInterval(id);
+  }, [replayPlaying, replaySpeed]);
 
   function fixToolCall(activityId: string) {
     const activity = toolActivities.find((a) => a.id === activityId);
@@ -599,7 +671,7 @@ export default function App({ config }: AppProps) {
           client,
           {
             model,
-            messages: history,
+            messages: toOpenAIMessages(history),
             temperature,
             systemPrompt,
             tools: toolDefs,
@@ -637,6 +709,7 @@ export default function App({ config }: AppProps) {
         const assistantMsg: ConversationMessage = {
           role: 'assistant',
           content: assistantContent,
+          ...(result.reasoning ? { reasoning: result.reasoning } : {}),
         };
 
         if (result.toolCalls.length > 0) {
@@ -962,9 +1035,11 @@ export default function App({ config }: AppProps) {
       switch (action.type) {
         case 'clear':
           setMessages([]);
+          setExpandedReasoning(new Set());
           setPartial('');
           setError(null);
           setToolCompact(false);
+          scrollback.end();
           logger.log({ event: 'clear' });
           break;
         case 'set-system':
@@ -1178,7 +1253,8 @@ export default function App({ config }: AppProps) {
             <Box flexGrow={1} flexDirection="column">
               <Box paddingX={1}>
                 <Text bold color="cyan">
-                  Replay · {replay.fileName} · event {replay.cursor + 1}/{replay.events.length} · ←/→ step · PgUp/PgDn jump · Esc exit
+                  Replay · {replay.fileName} · event {replay.cursor + 1}/{replay.events.length} ·{' '}
+                  {formatReplaySpeed(replay.speed, replay.playing)} · ←/→ step · +/- speed · Space play/pause · Esc exit
                 </Text>
               </Box>
               <ChatPanel
@@ -1213,7 +1289,12 @@ export default function App({ config }: AppProps) {
                   reasoning={reasoning}
                   generating={generating}
                   error={error}
-                  scrollOffset={scrollback.offset}
+                  scrollLine={scrollback.scrollLine}
+                  onMeasured={handleChatMeasured}
+                  onWheel={handleWheel}
+                  expandedReasoning={expandedReasoning}
+                  onToggleReasoning={toggleReasoning}
+                  chatBottomRow={termRows - 2}
                 />
               )}
             </Box>
@@ -1241,7 +1322,7 @@ export default function App({ config }: AppProps) {
             : replay?.view === 'picker'
               ? '↑↓ select session · Enter load · Esc exit'
               : replay?.view === 'play'
-                ? '←/→ step events · PgUp/PgDn jump · Esc exit replay'
+                ? '←/→ step events · +/- speed · Space play/pause · PgUp/PgDn jump · Esc exit replay'
                 : bench?.running
               ? 'Benchmark running — press Esc to cancel'
               : focusedActivity
@@ -1254,8 +1335,8 @@ export default function App({ config }: AppProps) {
                     ? 'Press [f] fix, [s] skip, or [r] retry'
                     : generating
                       ? 'Generating…'
-                      : messages.length > MAX_VISIBLE_MESSAGES
-                        ? 'Type a message · ↑/PgUp to scroll, / for commands'
+                      : maxScrollLine > 0
+                        ? 'Type a message · ↑/wheel to scroll · / for commands'
                         : 'Type a message, or / for commands'
         }
       />
