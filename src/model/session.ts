@@ -9,6 +9,8 @@ export interface AssistantMessage {
   role: 'assistant';
   content: string | null;
   tool_calls?: ToolCall[];
+  /** Reasoning tokens streamed by thinking models. UI-only: never sent back to the API. */
+  reasoning?: string;
 }
 
 export interface ToolMessage {
@@ -34,7 +36,13 @@ export interface ToolCall {
 }
 
 export function toOpenAIMessages(messages: ConversationMessage[]): ChatCompletionMessageParam[] {
-  return messages as ChatCompletionMessageParam[];
+  return messages.map((m) => {
+    if (m.role === 'assistant' && m.reasoning !== undefined) {
+      const { reasoning: _reasoning, ...rest } = m;
+      return rest;
+    }
+    return m;
+  }) as ChatCompletionMessageParam[];
 }
 
 /**
