@@ -161,6 +161,88 @@ Expected: All tests pass, verifying ASCII symbol rendering.
 
 ---
 
+## Check 8: Continuous Scrollback + Mouse Wheel
+
+**Objective:** Verify row-level chat scrolling (keyboard and wheel) clips cleanly inside the chat pane without corrupting the rest of the screen.
+
+**Note:** mouse/trackpad events require a terminal with SGR mouse support (iTerm2, Kitty, WezTerm, Ghostty, Windows Terminal). Apple Terminal does not report the mouse — keyboard paths still apply there.
+
+### Test Steps
+
+1. **Start xaku:**
+   ```bash
+   npm run dev
+   ```
+
+2. **Build a history that overflows the screen** (send 3–5 messages, or ask for something long):
+   ```
+   List the first 40 prime numbers with a one-line explanation each.
+   ```
+
+3. **Keyboard scrolling:**
+   - Press `↑` / `↓` — content moves one row at a time
+   - Press `PgUp` / `PgDn` — moves a full screenful
+   - Banner `↑ N rows above — Esc to return` appears at the top of the chat area
+   - Press `Esc` — jumps back to the live tail, banner disappears
+
+4. **Wheel scrolling (if terminal supports SGR mouse):**
+   - Two-finger scroll / wheel up — moves ~3 rows per notch
+   - Scroll back down to the tail — streaming content auto-follows again
+
+5. **While scrolled up:**
+   - Start a new generation (`/` commands or typing snaps to the tail first)
+   - Verify the model output grows off-screen while you stay at the same rows; `Esc` returns to the live view
+
+### Pass Criteria
+- ✅ TopBar, InputLine, and StatsBar are never overdrawn by chat content at any scroll position (the ink 5.2 clip-rect bug must stay fixed)
+- ✅ Banner row count matches actual scroll depth
+- ✅ Tail auto-follow works while generating; scrolled-up position holds while content grows
+- ✅ Typing or sending snaps back to the bottom
+- ✅ No `[<64;…` / `[<0;…` garbage ever appears in the prompt
+
+---
+
+## Check 9: Thinking Block Clickable Toggle + Ctrl+T
+
+**Objective:** Verify reasoning from thinking models persists after completion as a collapsed, toggleable block.
+
+Requires a reasoning-capable model (e.g. `qwen3:4b` streams `reasoning` deltas through Ollama).
+
+### Test Steps
+
+1. **Start xaku and ask a step-by-step question:**
+   ```
+   Think step by step: a train leaves Algiers at 90 km/h… (any reasoning-heavy prompt)
+   ```
+
+2. **During generation:**
+   - Reasoning streams in muted italic text inside the model block
+
+3. **After completion:**
+   - Reasoning is replaced by a compact inverse-video `thinking [+]` header
+   - The answer text remains visible; reasoning body hidden
+   - No flicker or duplicated "model" label at the transition
+
+4. **Click the header:**
+   - `thinking [−]` appears with the reasoning body expanded
+   - Click again — collapses back to `thinking [+]`
+   - (If clicking does nothing in your terminal, report the terminal name/version — SGR press coordinates may not be delivered.)
+
+5. **Keyboard fallback:**
+   - Press `Ctrl+T` — toggles the most recent thinking block (expand/collapse)
+
+6. **API hygiene:**
+   - Send a follow-up message; StatsBar `context` count should not include the hidden reasoning length
+
+### Pass Criteria
+- ✅ Completed thinking collapses to a `thinking [+]` button instead of vanishing
+- ✅ Click toggles expand/collapse both ways
+- ✅ `Ctrl+T` toggles the latest block
+- ✅ No prompt garbage when clicking
+- ✅ Reasoning is not re-sent to the model
+
+---
+
 ## Additional Manual Tests
 
 ### Cross-Platform Path Handling
@@ -310,6 +392,8 @@ Before marking v1 as complete, verify:
 - [ ] Check 1: Tool call approval flow works (manual)
 - [ ] Check 6: Ollama disconnect handled gracefully (manual)
 - [ ] Check 7: Symbol fallback works (manual)
+- [ ] Check 8: Continuous scrollback + mouse wheel (manual, SGR-capable terminal)
+- [ ] Check 9: Thinking block click toggle + Ctrl+T (manual, reasoning model)
 - [ ] Cross-platform path handling verified
 - [ ] Long-running tools can be cancelled
 - [ ] Session logs capture all events
@@ -329,5 +413,5 @@ If any manual test fails:
 
 ---
 
-**Last Updated:** Phase 8.2 - Acceptance Harness  
-**Test Coverage:** 7/7 checks (5 automated, 2 manual)
+**Last Updated:** 2026-11-04 — added Checks 8–9 (scrollback/mouse, thinking toggle)  
+**Test Coverage:** 9/9 checks (5 automated, 4 manual)

@@ -2,7 +2,7 @@
 
 A living record of everything discussed and built for xaku, the terminal workspace for chatting with, stress-testing, and reviewing local Ollama models. Keep this file updated as phases complete.
 
-Last updated: 2026-11-04 (test suite relocated from `src/` to `tests/` mirroring the source layout; 196 tests passing)
+Last updated: 2026-11-04 (later, 5 — reasoning collapsed by default with reliable click toggle + Ctrl+T; 233 tests passing)
 
 ---
 
@@ -352,7 +352,7 @@ User feedback: *"the text format he is trying to apply does not work"* — model
 
 ## 5. Current State
 
-**Working & verified** (typecheck ✅, 196 tests ✅, PTY smoke ✅, real Ollama ✅ with qwen3:4b, spec §14 harness ✅):
+**Working & verified** (typecheck ✅, 233 tests ✅, PTY smoke ✅, real Ollama ✅ with qwen3:4b, spec §14 harness ✅):
 - Fullscreen TUI: top bar, chat with live streaming + reasoning display, input with cursor/editing, stats bar pinned to the bottom.
 - Responsive resize: expand/widen/shrink repaints cleanly.
 - Streaming chat via Ollama; tok/s + context counters; connection status with retry.
@@ -370,22 +370,24 @@ User feedback: *"the text format he is trying to apply does not work"* — model
 - Auto-approve modes (`none` / `read-only` / `all`) via `--auto-approve`, `XAKU_AUTO_APPROVE`, `/autoapprove`, and the `[t]` hotkey; TopBar/ToolPanel indicators; all decisions logged.
 - Live streaming markdown: partial output renders through the markdown pipeline with `preprocessStreaming` closing unclosed fences/spans/emphasis.
 - Collapsible tool panel: `c` hotkey / `/compact` collapses completed activities to per-outcome summaries; actionable ones always stay expanded.
+- Animated tool spinners: non-terminal activities tick through the braille frames via `useSpinnerFrame` (shared with StatsBar, 80 ms cadence, interval only while something is active).
 - `write_file` approval previews show a colored line diff (capped 40 lines, exact counts, new-file and too-large fallbacks); existing content probed workspace-safely before prompting.
-- Scrollback: ↑/↓/PgUp/PgDn browse message history (dynamic page size from terminal height); auto-follow at the tail, position preserved while scrolled; Esc returns to the live view before it cancels.
+- Scrollback: continuous row-level scrolling like Claude Code/opencode — ↑/↓ by row, PgUp/PgDn by screenful, trackpad/mouse wheel by 3 rows (SGR mouse reporting, silently inactive where unsupported). The chat renders bottom-anchored (`column-reverse` + negative-margin shift) with exact heights from `measureElement`, so long messages scroll smoothly and long histories never break layout; tail auto-follows new content, `↑ N rows above — Esc to return` banner while scrolled, typing or sending snaps back to the tail. Mouse bytes are stripped before prompt insertion so wheel/click events can't type garbage.
+- Message styling: uniform 1-row `gap` between all messages (no per-message margins anywhere); user messages render in a rounded cyan bordered block, model output stays clean left-aligned. Reasoning from thinking models is stored on the assistant message but **collapsed by default** — the inverse-video `thinking [+]` header is a button: click it (SGR press mapped through measured row heights, ±1 tolerance) to expand to `thinking [−]`, click again to retract; `Ctrl+T` toggles the most recent thinking as a keyboard fallback. Reasoning is never sent back to the API.
 - Batch tool approval: multiple concurrent tool calls prompt together — `[a]/[d]` for the whole batch, `1-9` to review one, `t` releases newly-covered pending tools instantly; approved tools execute in parallel with results returned in tool_calls order.
 - Model benchmarking: `/benchmark <case> [models]` runs a saved test case across models with auto-approval, streams a live comparison table (time, tok/s, tools, ok/fail, tool ms, length), Esc cancels, failures become inline error rows.
-- Session replay: `/replay` picks from past session logs (or `/replay <index>`), step-through playback (←/→ events, PgUp/PgDn ends, Esc exits) reusing ChatPanel/ToolPanel; logs now carry `toolCallId` on all tool events plus capped output on success.
+- Session replay: `/replay` picks from past session logs (or `/replay <index>`), step-through playback (←/→ events, PgUp/PgDn ends, Esc exits) reusing ChatPanel/ToolPanel; auto-play with `Space`/`p`, speeds 1x/2x/4x/8x via `+`/`-` (manual steps pause, end-of-log auto-pauses); logs now carry `toolCallId` on all tool events plus capped output on success.
 
 **Pending**:
-- Manual TTY pass for the interactive batch-approval flow (scripted PTY harness flaky in this environment; logic covered by 196 automated tests).
-- Windows manual verification (all 196 tests + install flow on a real Windows box; CI Windows runner recommended).
+- Manual TTY pass for the interactive batch-approval flow (scripted PTY harness flaky in this environment; logic covered by automated tests).
+- Manual TTY pass for mouse-wheel scrolling and clicking the `thinking [+/−]` toggle (SGR reporting can't be exercised headlessly; buffered parser, sanitizer, row-mapping, and layout math are covered — 233 tests). Procedures: `docs/MANUAL_TESTS.md` Check 8–9.
+- Windows manual verification (all 233 tests + install flow on a real Windows box; CI Windows runner recommended).
 - Cross-platform CI (GitHub Actions matrix: macOS/Windows/Linux).
-- Animated per-activity spinners in ToolPanel (status icon is static `⠋`; animation would need a frame ticker like StatsBar).
 
 ## 6. Later (designed for, per spec §15)
 - Side-by-side model comparison: two models answering the same prompt in parallel split view (sequential variant now covered by `/benchmark`; live parallel sessions still to design).
 - Custom tool-call format checkers; more DB types.
-- UI polish roadmap: collapsible tool sections, diff views, scrollback (all shipped in Phase 10); remaining: message-level scrollback within very long messages, per-activity animated spinners, replay playback speed control.
+- UI polish roadmap: collapsible tool sections, diff views, message-window scrollback (Phase 10), per-activity animated spinners, replay playback speed control, and continuous row-level + mouse-wheel scrolling (all shipped 2026-11-04).
 
 ## 7. Reference: File Map
 
@@ -401,7 +403,7 @@ src/
     report.ts          # /export: Markdown + JSON report builder
   model/               # Model connection layer
     ollama.ts          # Streaming client (abort-signal aware), model list, /api/show tool-support
-    session.ts         # Message types, token estimation, fillMissingToolResults (dangling-call repair)
+    session.ts         # Message types (incl. UI-only reasoning on assistant), token estimation, fillMissingToolResults
     benchmark.ts       # Sequential multi-model benchmark runner with metrics accumulation
     replay.ts          # JSONL session log parsing + display reconstruction for replay
   tools/               # Tool engine
@@ -419,7 +421,10 @@ src/
     MarkdownText.tsx   # marked lexer → Ink renderers + cleanLatex + preprocessStreaming
     code-highlight.ts  # highlight.js → CodeSegment[] with scope→color map + line splitter
     diff.ts            # computeDiffLines/formatDiffSummary over `diff` pkg (40-line cap, exact counts)
-    useScrollback.ts   # bottom-anchored offset, dynamic page size from termRows, window math
+    useScrollback.ts   # row-based scroll position: clamp + tail auto-follow math on measured heights
+    mouse.ts           # SGR mouse parsing (wheel + clicks) via Ink's chunk emitter, enable/disable, prompt sanitizer
+    useSpinner.ts      # shared 80ms spinner-frame ticker (active-gated interval)
+    replay-controls.ts # pure replay speed cycle/interval math + header indicator formatting
     TopBar.tsx  ChatPanel.tsx  InputLine.tsx  StatsBar.tsx
     CommandMenu.tsx  ToolPanel.tsx  ToolActivity.ts
     BenchmarkPanel.tsx  SessionPicker.tsx
@@ -439,11 +444,13 @@ tests/                 # Vitest suite, mirrors src/ layout (moved out of src/ 20
   ui/
     theme.test.ts      # 5 tests (spec §14 Check 7)
     markdown.test.ts   # 55 tests
-    toolpanel.test.ts  # 13 tests (compact mode, diff render, batch approval UI)
-    chatpanel.test.ts  # 7 tests (scrollback windowing)
+    toolpanel.test.ts  # 18 tests (compact mode, diff render, batch approval UI, animated spinner)
+    chatpanel.test.ts  # 13 tests (bottom-anchored rows, banner, collapsed/expanded reasoning, user box, header-row mapping)
     diff.test.ts       # 12 tests
-    useScrollback.test.ts # 9 tests
+    useScrollback.test.ts # 6 tests (clamp + follow-scroll math)
     benchmark.test.ts  # 5 tests (BenchmarkPanel + SessionPicker render)
+    replay-controls.test.ts # 7 tests (speed cycle, interval math, header format)
+    mouse.test.ts      # 22 tests (SGR wheel/click parsing, chunk buffering, sanitizing)
 scripts/
   smoke.ts             # manual: chat round-trip
   tool-test.ts         # manual: model→validate→execute→feedback
@@ -454,6 +461,16 @@ MANUAL_TESTS.md        # step-by-step procedures for manual acceptance checks
 ```
 
 ## 8. Change Log (append new entries at top)
+
+- **2026-11-04 (later, 3)** — Continuous row-level scrollback + mouse wheel (final §6 polish item; replaces the Phase 10 message-window scrolling). The first iteration of this task shipped an Enter-to-open modal message viewport; user feedback demanded clean, continuous scrolling "exactly like opencode/Claude Code" including trackpad/mouse, so it was reworked the same day and the modal removed (`MessageViewport.tsx`/`messageScroll.ts` deleted). (1) **Row-based model**: `useScrollback` tracks `scrollLine` (rows from tail) with pure, tested `clampScrollLine`/`followScroll` math — tail stays auto-followed, scrolled-up positions hold the same rows as content grows. `ChatPanel` renders bottom-anchored: a `justifyContent="flex-end"` + `overflow="hidden"` container holding a `column-reverse` content stack shifted down by `marginBottom={-scrollLine}`; exact heights come from real Yoga layout via `measureElement` in a `useLayoutEffect`, reported through `onMeasured` (changed-only, callback ref — no measure loops). So scrolling is exact for wrapped text/markdown/code blocks, and long messages need no special mode. ↑/↓ one row, PgUp/PgDn a screenful (page = measured viewport), Esc returns to tail before cancel, typing/sending snaps to tail; banner `↑ N rows above — Esc to return`. (2) **Mouse wheel**: `src/ui/mouse.ts` enables SGR reporting (`?1000h?1006h`, 3 rows/notch) — attached to Ink's `internal_eventEmitter`, never `stdin.on('data')` (Ink owns the stream via `readable`/`read()`; a data listener steals keyboard bytes). Reporting disabled on unmount and in the cli.tsx exit cleanup; silently inactive on non-TTY. Ink surfaces mouse chunks to every `useInput` as `[<n;x;yM` (ESC stripped), so `InputLine` runs `stripSgrMouse` before inserting text — wheel scrolling can't type garbage into the prompt. (3) Message-windowing (`MAX_VISIBLE_MESSAGES`, `computeMessageWindow`) is gone — the whole history lays out inside the clipped viewport. Tests reshaped: 12 mouse/parser, 6 follow-scroll math, 7 ChatPanel layout (ink-testing-library asserts real clipping); 217 total, 18 files; typecheck ✅ typecheck:tests ✅ build ✅ headless boot ✅. Manual TTY wheel pass still to do (added to §5 Pending).
+
+- **2026-11-04 (later, 5)** — Reasoning collapsed by default + reliable click toggling + `Ctrl+T` fallback (user feedback on later, 4: thinking should only show on demand, and the click button wasn't firing). (1) Inverted the state to `expandedReasoning` (app.tsx): completed assistant messages render `thinking [+]` with the body hidden; clicking expands to `thinking [−]`, clicking again retracts — new messages always start hidden. Header text shortened (no 'click to…' hint) so it can never wrap off the mapped row. (2) Click reliability: `useMouseEvents` now **buffers raw stdin chunks** (`parseMouseBuffer` — `stdin.read()` can split `[<0;x;yM` at any byte; matched sequences are consumed, only a trailing partial prefix is kept, keyboard bytes never accumulate), and mouse reporting adds `?1002` button-event tracking alongside `?1000`/`?1006` (some terminals only emit presses with 1002). (3) Row mapping no longer hard-codes the pane top: app passes `chatBottomRow = termRows − 2` (StatsBar+InputLine) and ChatPanel derives `containerTop = chatBottomRow − containerHeight + 1`; click matching takes the closest header within ±1 row. (4) Keyboard fallback `Ctrl+T` in the app-level `useInput` toggles the most recent reasoning message's block (safe: InputLine swallows all ctrl combos, and the handler sits after the replay branch). 233 tests (18 files: +4 buffer cases, reasoning tests flipped to default-collapsed); typecheck ✅ typecheck:tests ✅ build ✅ headless boot ✅. Real-TTY check needed for: clicking the thinking button and Ctrl+T.
+
+- **2026-11-04 (later, 4)** — Uniform message styling + persistent, click-collapsible reasoning (user feedback: gaps between user/model blocks were inconsistent and the thinking text vanished at stream end). (1) **Spacing**: all per-message `marginY` and all per-block margins in `MarkdownText` removed; the chat content stack and the markdown token container now use `gap={1}`, so every message (and every block inside one) is separated by exactly one row regardless of role or content type. (2) **User block**: user messages render inside a rounded cyan bordered box (`borderStyle="round"` + `paddingX`) like opencode; model output stays plain left-aligned. (3) **Reasoning persistence**: `AssistantMessage.reasoning?: string` added (UI-only — `toOpenAIMessages` strips it, `estimateContextTokens` never counts it); `app.tsx` stores `result.reasoning` on the final assistant message so thinking no longer disappears when the stream block unmounts. (4) **Collapsible + clickable**: completed reasoning renders in a `ReasoningBlock` — inverse-video `thinking [−] click to collapse` button header (muted italic body expanded by default; ` [+]` collapsed). Clicking works by mapping SGR mouse **press** events to screen rows: `mouse.ts` now parses all SGR sequences (`parseSgrMouse` → wheel/click with x/y, `useMouseEvents` hook), ChatPanel measures each stack item's height (callback refs) and computes absolute reasoning-header rows via pure, tested `computeReasoningHeaderRows` (bottom-up walk of the column-reverse stack: containerTop + measured heights + gaps + scroll shift); a left click landing on a header row toggles that message's collapsed index in app state. The click handler lives in ChatPanel (wheel moved there too, via `onWheel` prop). `stripSgrMouse` generalized to strip press/release sequences too. (5) **Critical ink 5.2.1 finding**: a `flexGrow` + `justifyContent=flex-end` + `overflow=hidden` box gets a WRONG clip rect (computedTop collapses to the parent origin, so up-overflow silently bleeds over the banner row — the bordered blocks made this visible; the old margin-only layout hid it by row parity). Fixed by self-measuring the ChatPanel outer box (`useLayoutEffect` + `measureElement`) and pinning the clipped container to an explicit `height`; ink-testing-library frames now prove nothing bleeds above the container. Mouse enable/disable additionally guarded by `process.stdout.isTTY` so headless test runs don't emit SGR noise. 12 new tests (229 total, 18 files); typecheck ✅ typecheck:tests ✅ build ✅ headless boot ✅. Manual TTY pass still to do: actual clicking of the thinking button (row-mapping depends on real terminal coordinates).
+
+- **2026-11-04 (later, 2)** — Replay playback speed control (roadmap item from §6). `/replay` play view gains auto-advance: `Space`/`p` toggles play/pause (replays from start when at end-of-log), `+`/`-` cycle speeds 1x→2x→4x→8x at a 1 s/event base, manual ←/→/PgUp/PgDn steps pause auto-play for inspection, end-of-log auto-pauses. `ReplayState` play variant carries `speed`/`playing`; a dedicated `useEffect` keyed on `[playing, speed]` runs the interval with functional `setReplay` (no stale closures, cleanup on every transition). Pure math/format helpers extracted to `src/ui/replay-controls.ts` with 7 new tests; header line shows `1x ⏸`/`2x ▶` indicator and updated key hints; input placeholder mirrors the controls. 208 tests passing (17 files); typecheck ✅ typecheck:tests ✅ build ✅.
+
+- **2026-11-04 (later)** — Animated per-activity spinners in ToolPanel (roadmap item from §6). New `src/ui/useSpinner.ts`: `useSpinnerFrame(active)` returns the current `symbols.spinner` index, ticking on an 80 ms interval that only runs while `active` (effect cleanup clears it). `ToolPanel` computes activity presence from statuses (hook call before the empty-activities early return), threads the frame through `ToolActivityView` → `getStatusIcon(status, frame)`; non-terminal rows (`validating`/`awaiting_approval`/`approved`/`running`) now animate in lockstep, terminal rows keep static icons. `StatsBar` refactored onto the same hook — behavior identical, single source of truth for the cadence. Test helper `frame()` in `tests/ui/toolpanel.test.ts` now unmounts panels (no interval leaks); 5 new tests (fake timers + `advanceTimersByTimeAsync`): initial frame, cycling, wraparound, no-tick-when-all-terminal, mixed static/spinning rows. 201 tests passing (16 files); typecheck ✅ typecheck:tests ✅ build ✅.
 
 - **2026-11-04** — Test suite relocation. All 16 `*.test.ts` files moved out of `src/` into a top-level `tests/` folder mirroring the source layout (`tests/commands/`, `tests/model/`, `tests/tools/`, `tests/ui/`) — source folders now contain shipped code only. Every relative import rewritten to the `../../src/...` form; hard-coded test paths in `scripts/acceptance.ts` updated; `MANUAL_TESTS.md` and the §7 file map refreshed. No config changes needed: Vitest's default discovery covers `tests/**/*.test.ts`, and `tsconfig.json` already excluded `**/*.test.ts` from the build, so `dist/` output is unchanged. Bonus: added `tsconfig.test.json` + `npm run typecheck:tests` so the suite is now type-checked too (previously it never was) — surfaced and fixed one dead `mkdir` import in `tests/model/replay.test.ts`. 196 tests still passing; typecheck ✅ build ✅ acceptance harness ✅.
 

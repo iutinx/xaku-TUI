@@ -150,9 +150,11 @@ All unit tests should pass on Windows:
 npm test
 ```
 
-Expected: 96 tests passing (86 existing + 10 path handling tests).
+Expected: 233 tests passing (18 files — unit + UI layout tests).
 
 ### Manual Tests
+
+> For the UI-polish flows (row scrollback + mouse wheel, thinking-block click toggle + `Ctrl+T`) follow **Check 8 and Check 9** in `docs/MANUAL_TESTS.md` — Windows Terminal supports SGR mouse reporting, so the wheel and clicks should work there.
 
 #### Test 1: Basic Chat
 
