@@ -3,6 +3,7 @@ import { Command } from 'commander';
 import { render } from 'ink';
 import App from './app.js';
 import { buildConfig } from './config.js';
+import { DISABLE_MOUSE } from './ui/mouse.js';
 
 const program = new Command();
 
@@ -34,7 +35,7 @@ buildConfig(workspaceArg, options)
     const cleanup = () => {
       if (cleaned) return;
       cleaned = true;
-      process.stdout.write(LEAVE_ALT_SCREEN + SHOW_CURSOR);
+      process.stdout.write(DISABLE_MOUSE + LEAVE_ALT_SCREEN + SHOW_CURSOR);
     };
 
     process.on('exit', cleanup);

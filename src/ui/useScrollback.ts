@@ -1,74 +1,63 @@
 import { useEffect, useRef, useState } from 'react';
 
-/** Messages rendered at once when anchored at the bottom (previous hardcoded window). */
-export const MAX_VISIBLE_MESSAGES = 12;
-
-/**
- * Half-screenful page step derived from live terminal height.
- * 4 rows of chrome (top bar, stats bar, input line + margin), ~3 rows per message.
- */
-export function computePageSize(termRows: number): number {
-  return Math.max(1, Math.floor((termRows - 4) / 3));
-}
-
-/** Largest offset that still shows a full window (or 0 when everything fits). */
-export function maxOffset(total: number, visibleCount = MAX_VISIBLE_MESSAGES): number {
-  return Math.max(0, total - visibleCount);
-}
-
-export function clampOffset(offset: number, total: number): number {
-  return Math.max(0, Math.min(offset, maxOffset(total)));
-}
-
-/**
- * Window of message indices to render for a bottom-anchored scroll offset.
- * offset 0 => last MAX_VISIBLE_MESSAGES messages; larger offset moves the
- * window toward older messages.
- */
-export function computeMessageWindow(
-  total: number,
-  offset: number,
-  visibleCount = MAX_VISIBLE_MESSAGES,
-): { start: number; end: number } {
-  const end = Math.max(0, total - clampOffset(offset, total));
-  const start = Math.max(0, end - visibleCount);
-  return { start, end };
-}
-
 export interface Scrollback {
-  offset: number;
+  scrollLine: number;
   isScrolled: boolean;
-  pageSize: number;
-  up: () => void;
-  down: () => void;
+  up: (delta?: number) => void;
+  down: (delta?: number) => void;
   pageUp: () => void;
   pageDown: () => void;
   end: () => void;
 }
 
-export function useScrollback(total: number, termRows: number): Scrollback {
-  const [offset, setOffset] = useState(0);
-  const pageSize = computePageSize(termRows);
-  const prevTotalRef = useRef(total);
+export function clampScrollLine(scrollLine: number, maxScrollLine: number): number {
+  return Math.max(0, Math.min(scrollLine, maxScrollLine));
+}
+
+/**
+ * Position after the content height changes from prevContent to nextContent.
+ * At the tail (0) the view stays pinned to the bottom (auto-follow); when
+ * scrolled up, the position grows with the content so the same rows remain
+ * on screen. Shrinks (or new limits) clamp back into range.
+ */
+export function followScroll(
+  prevContent: number,
+  nextContent: number,
+  scrollLine: number,
+  maxScrollLine: number,
+): number {
+  const delta = nextContent - prevContent;
+  if (delta <= 0 || scrollLine === 0) return clampScrollLine(scrollLine, maxScrollLine);
+  return clampScrollLine(scrollLine + delta, maxScrollLine);
+}
+
+/**
+ * Row-based scroll position, anchored to the bottom (0 = live tail).
+ *
+ * All arguments come from the measured chat viewport (ChatPanel onMeasured),
+ * so scrolling is exact for whatever the terminal actually rendered — wrapped
+ * lines, markdown blocks, and all.
+ */
+export function useScrollback(maxScrollLine: number, pageSize: number, contentHeight: number): Scrollback {
+  const [scrollLine, setScrollLine] = useState(0);
+  const prevContentRef = useRef(contentHeight);
 
   useEffect(() => {
-    const delta = total - prevTotalRef.current;
-    prevTotalRef.current = total;
-    // While scrolled up, keep viewing the same messages as history grows:
-    // each new message increases the distance from the bottom.
-    setOffset((o) => clampOffset(o > 0 && delta > 0 ? o + delta : o, total));
-  }, [total]);
+    const prev = prevContentRef.current;
+    prevContentRef.current = contentHeight;
+    setScrollLine((o) => followScroll(prev, contentHeight, o, maxScrollLine));
+  }, [contentHeight, maxScrollLine]);
 
-  const move = (delta: number) => setOffset((o) => clampOffset(o + delta, total));
+  const move = (delta: number) =>
+    setScrollLine((prev) => clampScrollLine(prev + delta, maxScrollLine));
 
   return {
-    offset,
-    isScrolled: offset > 0,
-    pageSize,
-    up: () => move(1),
-    down: () => move(-1),
+    scrollLine,
+    isScrolled: scrollLine > 0,
+    up: (delta = 1) => move(delta),
+    down: (delta = 1) => move(-delta),
     pageUp: () => move(pageSize),
     pageDown: () => move(-pageSize),
-    end: () => setOffset(0),
+    end: () => setScrollLine(0),
   };
 }

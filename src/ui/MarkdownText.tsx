@@ -218,7 +218,7 @@ export function MarkdownText({ content }: MarkdownTextProps) {
   }, [content]);
 
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" gap={1}>
       {tokens.map((token, i) => (
         <BlockToken key={i} token={token} />
       ))}
@@ -236,7 +236,7 @@ function BlockToken({ token }: { token: AnyToken }) {
       return <CodeBlockToken token={token} />;
     case 'hr':
       return (
-        <Box marginY={1}>
+        <Box>
           <Text color={theme.muted}>{'─'.repeat(40)}</Text>
         </Box>
       );
@@ -250,7 +250,7 @@ function BlockToken({ token }: { token: AnyToken }) {
       return null;
     case 'paragraph':
       return (
-        <Box marginBottom={1}>
+        <Box>
           <Text wrap="wrap">{renderInline((token.tokens as AnyToken[]) ?? [])}</Text>
         </Box>
       );
@@ -258,13 +258,13 @@ function BlockToken({ token }: { token: AnyToken }) {
       const children = token.tokens as AnyToken[] | undefined;
       if (children && Array.isArray(children)) {
         return (
-          <Box marginBottom={1}>
+          <Box>
             <Text wrap="wrap">{renderInline(children)}</Text>
           </Box>
         );
       }
       return (
-        <Box marginBottom={1}>
+        <Box>
           <Text wrap="wrap">{cleanLatex(String(token.text ?? ''))}</Text>
         </Box>
       );
@@ -278,7 +278,7 @@ function HeadingToken({ token }: { token: AnyToken }) {
   const depth = Number(token.depth ?? 1);
   const children = (token.tokens as AnyToken[]) ?? [];
   return (
-    <Box marginTop={1} marginBottom={1}>
+    <Box>
       <Text bold color={theme.primary}>{`${'#'.repeat(depth)} `}</Text>
       <Text bold color={theme.primary} wrap="wrap">
         {renderInline(children)}
@@ -296,7 +296,7 @@ function CodeBlockToken({ token }: { token: AnyToken }) {
   }, [code, lang]);
 
   return (
-    <Box flexDirection="column" marginY={1}>
+    <Box flexDirection="column">
       {lang && (
         <Text color={theme.muted} dimColor>
           {`[ ${lang} ]`}
@@ -335,7 +335,6 @@ function BlockquoteToken({ token }: { token: AnyToken }) {
   return (
     <Box
       flexDirection="column"
-      marginY={1}
       marginLeft={1}
       borderStyle="single"
       borderLeft
@@ -375,7 +374,7 @@ function ListToken({ token }: { token: AnyToken }) {
   const start = Number(token.start) || 1;
   const items = (token.items as AnyToken[]) ?? [];
   return (
-    <Box flexDirection="column" marginY={1}>
+    <Box flexDirection="column">
       {items.map((item, i) => (
         <ListItem key={i} item={item} index={i} ordered={ordered} start={start} />
       ))}
@@ -434,7 +433,7 @@ function TableToken({ token }: { token: AnyToken }) {
     cells.map((c, i) => c.padEnd(widths[i])).join(' │ ');
 
   return (
-    <Box flexDirection="column" marginY={1}>
+    <Box flexDirection="column">
       <Text bold color={theme.primary}>{renderRow(headerCells)}</Text>
       <Text color={theme.muted}>{widths.map((w) => '─'.repeat(w)).join('─┼─')}</Text>
       {rowCells.map((row, i) => (

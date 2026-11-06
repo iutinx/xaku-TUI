@@ -2,6 +2,7 @@ import { Box, Text, useInput } from 'ink';
 import { useEffect, useState } from 'react';
 import { getFilteredCommands, type CommandDef } from '../commands/index.js';
 import { CommandMenu } from './CommandMenu.js';
+import { stripSgrMouse } from './mouse.js';
 import { symbols } from './theme.js';
 
 export interface InputLineProps {
@@ -41,7 +42,11 @@ export function InputLine({ value, onChange, onSubmit, disabled, placeholder }: 
   }
 
   useInput(
-    (input, key) => {
+    (rawInput, key) => {
+      // Wheel events surface as `[<64;x;yM` fragments after Ink strips the
+      // ESC; drop them so they never reach the prompt text.
+      const input = stripSgrMouse(rawInput);
+
       // Command menu navigation takes priority over line editing.
       if (menuVisible) {
         if (key.upArrow) {
