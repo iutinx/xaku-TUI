@@ -1,6 +1,6 @@
 import { Box, Text } from 'ink';
-import { useEffect, useState } from 'react';
 import { symbols, theme } from './theme.js';
+import { useSpinnerFrame } from './useSpinner.js';
 
 export interface StatsBarProps {
   connected: boolean;
@@ -21,13 +21,7 @@ export function StatsBar({
   toolSuccess,
   toolFail,
 }: StatsBarProps) {
-  const [frame, setFrame] = useState(0);
-
-  useEffect(() => {
-    if (!generating && !checking) return;
-    const id = setInterval(() => setFrame((f) => (f + 1) % symbols.spinner.length), 80);
-    return () => clearInterval(id);
-  }, [generating, checking]);
+  const frame = useSpinnerFrame(generating || checking);
 
   const spinner = generating ? symbols.spinner[frame] : symbols.success;
 

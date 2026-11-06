@@ -1,8 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from 'ink-testing-library';
 import React from 'react';
 import { ToolPanel } from '../../src/ui/ToolPanel.js';
 import { computeDiffLines } from '../../src/ui/diff.js';
+import { SPINNER_INTERVAL_MS } from '../../src/ui/useSpinner.js';
+import { symbols } from '../../src/ui/theme.js';
 import type { ToolActivity } from '../../src/ui/ToolActivity.js';
 
 function activity(overrides: Partial<ToolActivity> & { id: string; toolName: string }): ToolActivity {
@@ -17,10 +19,12 @@ function activity(overrides: Partial<ToolActivity> & { id: string; toolName: str
 }
 
 function frame(activities: ToolActivity[], compact = false, extra: { pendingIds?: string[]; focusedId?: string | null } = {}): string {
-  const { lastFrame } = render(
+  const { lastFrame, unmount } = render(
     React.createElement(ToolPanel, { activities, compact, ...extra }),
   );
-  return lastFrame() ?? '';
+  const out = lastFrame() ?? '';
+  unmount();
+  return out;
 }
 
 describe('ToolPanel compact mode', () => {
@@ -142,5 +146,64 @@ describe('ToolPanel write_file diff render', () => {
     const big = diffActivity({ diff: computeDiffLines('', Array.from({ length: 60 }, (_, i) => `n${i}`).join('\n')) });
     const out = frame([big]);
     expect(out).toContain('and 20 more lines');
+  });
+});
+
+describe('ToolPanel animated spinner', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const runningActivity = () =>
+    activity({ id: 'r', toolName: 'run_shell', status: 'running', result: undefined, duration: undefined });
+
+  it('starts non-terminal activities on the first spinner frame', () => {
+    const out = frame([runningActivity()]);
+    expect(out).toContain(`${symbols.spinner[0]} run_shell`);
+  });
+
+  it('cycles through spinner frames while activities are non-terminal', async () => {
+    vi.useFakeTimers();
+    const { lastFrame, unmount } = render(React.createElement(ToolPanel, { activities: [runningActivity()] }));
+    expect(lastFrame() ?? '').toContain(symbols.spinner[0]);
+    await vi.advanceTimersByTimeAsync(SPINNER_INTERVAL_MS);
+    expect(lastFrame() ?? '').toContain(symbols.spinner[1]);
+    await vi.advanceTimersByTimeAsync(SPINNER_INTERVAL_MS * 2);
+    expect(lastFrame() ?? '').toContain(symbols.spinner[3]);
+    unmount();
+  });
+
+  it('wraps around the frame list', async () => {
+    vi.useFakeTimers();
+    const { lastFrame, unmount } = render(React.createElement(ToolPanel, { activities: [runningActivity()] }));
+    await vi.advanceTimersByTimeAsync(SPINNER_INTERVAL_MS * symbols.spinner.length);
+    expect(lastFrame() ?? '').toContain(symbols.spinner[0]);
+    await vi.advanceTimersByTimeAsync(SPINNER_INTERVAL_MS);
+    expect(lastFrame() ?? '').toContain(symbols.spinner[1]);
+    unmount();
+  });
+
+  it('does not tick when every activity is terminal', async () => {
+    vi.useFakeTimers();
+    const { lastFrame, unmount } = render(
+      React.createElement(ToolPanel, { activities: [activity({ id: 's', toolName: 'read_file', status: 'success' })] }),
+    );
+    await vi.advanceTimersByTimeAsync(SPINNER_INTERVAL_MS * 5);
+    expect(lastFrame() ?? '').toContain(`${symbols.success} read_file`);
+    unmount();
+  });
+
+  it('keeps terminal rows static while a sibling activity spins', async () => {
+    vi.useFakeTimers();
+    const mixed = [
+      activity({ id: 's', toolName: 'read_file', status: 'success' }),
+      runningActivity(),
+    ];
+    const { lastFrame, unmount } = render(React.createElement(ToolPanel, { activities: mixed }));
+    await vi.advanceTimersByTimeAsync(SPINNER_INTERVAL_MS * 3);
+    const out = lastFrame() ?? '';
+    expect(out).toContain(`${symbols.success} read_file`);
+    expect(out).toContain(`${symbols.spinner[3]} run_shell`);
+    unmount();
   });
 });

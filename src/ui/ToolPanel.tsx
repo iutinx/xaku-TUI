@@ -2,6 +2,7 @@ import { Box, Text } from 'ink';
 import type { ToolActivity, ToolActivityStatus } from './ToolActivity.js';
 import { formatDiffSummary, type DiffLineType, type DiffResult } from './diff.js';
 import { symbols, theme } from './theme.js';
+import { useSpinnerFrame } from './useSpinner.js';
 
 export interface ToolPanelProps {
   activities: ToolActivity[];
@@ -22,6 +23,8 @@ const COMPACT_LABELS: Record<string, string> = {
 };
 
 export function ToolPanel({ activities, compact = false, pendingIds = [], focusedId = null }: ToolPanelProps) {
+  const spinnerFrame = useSpinnerFrame(activities.some((a) => !TERMINAL_STATUSES.includes(a.status)));
+
   if (activities.length === 0) {
     return null;
   }
@@ -46,6 +49,7 @@ export function ToolPanel({ activities, compact = false, pendingIds = [], focuse
           activity={activity}
           pendingIndex={pendingIds.indexOf(activity.id)}
           focused={activity.id === focusedId}
+          spinnerFrame={spinnerFrame}
         />
       ))}
       {collapsed.length > 0 && <CompactSummary groups={groups} />}
@@ -93,12 +97,14 @@ function ToolActivityView({
   activity,
   pendingIndex = -1,
   focused = false,
+  spinnerFrame = 0,
 }: {
   activity: ToolActivity;
   pendingIndex?: number;
   focused?: boolean;
+  spinnerFrame?: number;
 }) {
-  const icon = getStatusIcon(activity.status);
+  const icon = getStatusIcon(activity.status, spinnerFrame);
   const iconColor = getStatusColor(activity.status);
   
   const argsStr = Object.entries(activity.arguments)
@@ -238,13 +244,13 @@ function DiffView({ diff }: { diff: DiffResult }) {
   );
 }
 
-function getStatusIcon(status: ToolActivityStatus): string {
+function getStatusIcon(status: ToolActivityStatus, spinnerFrame = 0): string {
   switch (status) {
     case 'validating':
     case 'awaiting_approval':
     case 'approved':
     case 'running':
-      return symbols.spinner[0];
+      return symbols.spinner[spinnerFrame % symbols.spinner.length];
     case 'success':
       return symbols.success;
     case 'failed':
