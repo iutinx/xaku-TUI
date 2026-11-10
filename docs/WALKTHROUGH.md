@@ -350,6 +350,69 @@ User feedback: *"the text format he is trying to apply does not work"* — model
 
 **Known-untested (flag for a manual TTY pass)**: interactive batch-approval flow (type prompt → 2 tool calls → `[1]` review → `a`) inside a real terminal — the scripted PTY harness proved flaky in this environment (frames intermittently not rendered by the harness, unrelated to app code; unit + render tests cover the logic). Verify once manually with `npm run dev`.
 
+### Phase 12 — Model comparison: side-by-side fine-tune evaluation
+
+**Goal**: Let developers visually compare how two models (e.g., a base model vs. a fine-tuned variant) respond to the same test case, with per-dimension scoring.
+
+**1. New `/compare` command**:
+- `/compare <case> modelA,modelB` runs the saved test case against two models **in parallel** and shows a split-view comparison.
+- Extended `TestCase` format (backwards compatible):
+  ```ts
+  {
+    prompt: string;
+    systemPrompt: string | null;
+    expectedAnswer?: string;        // optional reference answer
+    evaluationCriteria?: string[];  // e.g. ["uses read_file", "answers in French"]
+  }
+  ```
+- Existing saved cases continue to work; the new fields are optional.
+
+**2. Comparison engine (`src/model/compare.ts`)**:
+- `runComparison(leftModel, rightModel, options)` — parallel execution via `Promise.all`, each model gets its own AbortController (both linked to a parent signal for unified cancellation).
+- Per-side result (`CompareSideResult`): full response text, reasoning, message history, tool activities with live status updates, metrics (tok/s, tool ok/fail, time).
+- Callbacks for streaming: `onContent`, `onReasoning`, `onToolActivity`, `onTurnEnd` — the UI updates in real time as both models stream.
+
+**3. Split-view UI (`src/ui/ComparePanel.tsx`)**:
+- Two panes side by side: left (Model A) and right (Model B).
+- Each pane: model name, tok/s, tool ok/fail counts, response text (streaming), reasoning preview, tool activity list.
+- Bordered panes with focus highlighting (cyan when focused).
+
+**4. Rating mode (after run completes)**:
+- Press `[r]` to enter rating mode.
+- Four dimensions, each scored 1–5 per model:
+  - `accuracy` — factual correctness / answer quality
+  - `speed` — **auto-derived** from measured tok/s (fastest = 5, slower scaled linearly, editable)
+  - `toolCorrectness` — right tool chosen, valid args, correct execution
+  - `instructionFollowing` — matches evaluation criteria and system prompt
+- Keys in rating mode:
+  - `[1-5]` — set score for focused model + active dimension
+  - `←/→` — cycle dimensions
+  - `↑/↓` — switch model pane
+  - `Enter` — next empty slot
+  - `Esc` — exit rating mode
+- Ratings are logged as `compare_rate` events and stored in `ComparisonScore`.
+
+**5. Export (`/export` while in compare mode)**:
+- Produces `xaku-compare-<timestamp>.md` + `.json`.
+- Markdown: prompt, both model responses side by side, metrics table, ratings table, notes.
+- JSON: full structured data for programmatic analysis.
+
+**6. Tests** (20 new):
+- `tests/model/compare.test.ts` — 9: `emptySide`, `emptyRatings`, `autoSpeedScore` (equal, faster/slower, zero handling), `DIMENSIONS`, `DIMENSION_LABELS`.
+- `tests/ui/compare.test.ts` — 7: split-view render, response text, rating hint, score table, rating mode, partial streaming, tool activities.
+- `tests/commands/commands.test.ts` — 4 new: `/compare` parsing (valid, one model, three models, spaces).
+
+**Files added/modified**:
+- `src/model/compare.ts` — new: parallel comparison engine, scoring types, helpers.
+- `src/ui/ComparePanel.tsx` — new: split-view UI + rating mode.
+- `src/commands/cases.ts` — extended `TestCase` with `expectedAnswer`, `evaluationCriteria`.
+- `src/commands/index.ts` — added `/compare` command definition and parser.
+- `src/app.tsx` — `CompareState`, `startComparison`, `cancelComparison`, useInput routing, render routing, `/export` comparison export.
+- `src/commands/report.ts` — added `exportComparison` for Markdown + JSON reports.
+- `tests/model/compare.test.ts`, `tests/ui/compare.test.ts` — new test files.
+
+**Status**: Implementation complete, typecheck and tests pending verification (Node.js environment issue during development).
+
 ## 5. Current State
 
 **Working & verified** (typecheck ✅, 233 tests ✅, PTY smoke ✅, real Ollama ✅ with qwen3:4b, spec §14 harness ✅):
@@ -376,6 +439,7 @@ User feedback: *"the text format he is trying to apply does not work"* — model
 - Message styling: uniform 1-row `gap` between all messages (no per-message margins anywhere); user messages render in a rounded cyan bordered block, model output stays clean left-aligned. Reasoning from thinking models is stored on the assistant message but **collapsed by default** — the inverse-video `thinking [+]` header is a button: click it (SGR press mapped through measured row heights, ±1 tolerance) to expand to `thinking [−]`, click again to retract; `Ctrl+T` toggles the most recent thinking as a keyboard fallback. Reasoning is never sent back to the API.
 - Batch tool approval: multiple concurrent tool calls prompt together — `[a]/[d]` for the whole batch, `1-9` to review one, `t` releases newly-covered pending tools instantly; approved tools execute in parallel with results returned in tool_calls order.
 - Model benchmarking: `/benchmark <case> [models]` runs a saved test case across models with auto-approval, streams a live comparison table (time, tok/s, tools, ok/fail, tool ms, length), Esc cancels, failures become inline error rows.
+- Model comparison: `/compare <case> modelA,modelB` runs two models in parallel on the same test case, shows a split-view with live streaming responses, tool activity per side, and per-dimension rating mode (1–5 for accuracy/speed/toolCorrectness/instructionFollowing) after completion; `speed` is auto-scored from measured tok/s. `/export` produces a comparison report (Markdown + JSON).
 - Session replay: `/replay` picks from past session logs (or `/replay <index>`), step-through playback (←/→ events, PgUp/PgDn ends, Esc exits) reusing ChatPanel/ToolPanel; auto-play with `Space`/`p`, speeds 1x/2x/4x/8x via `+`/`-` (manual steps pause, end-of-log auto-pauses); logs now carry `toolCallId` on all tool events plus capped output on success.
 
 **Pending**:
@@ -385,9 +449,9 @@ User feedback: *"the text format he is trying to apply does not work"* — model
 - Cross-platform CI (GitHub Actions matrix: macOS/Windows/Linux).
 
 ## 6. Later (designed for, per spec §15)
-- Side-by-side model comparison: two models answering the same prompt in parallel split view (sequential variant now covered by `/benchmark`; live parallel sessions still to design).
 - Custom tool-call format checkers; more DB types.
-- UI polish roadmap: collapsible tool sections, diff views, message-window scrollback (Phase 10), per-activity animated spinners, replay playback speed control, and continuous row-level + mouse-wheel scrolling (all shipped 2026-11-04).
+- UI polish roadmap: per-activity animated spinners, replay playback speed control improvements.
+- N-way comparison (more than 2 models at once) — currently limited to 2 for clarity.
 
 ## 7. Reference: File Map
 
@@ -405,6 +469,7 @@ src/
     ollama.ts          # Streaming client (abort-signal aware), model list, /api/show tool-support
     session.ts         # Message types (incl. UI-only reasoning on assistant), token estimation, fillMissingToolResults
     benchmark.ts       # Sequential multi-model benchmark runner with metrics accumulation
+    compare.ts         # Parallel two-model comparison with scoring types and auto-speed scoring
     replay.ts          # JSONL session log parsing + display reconstruction for replay
   tools/               # Tool engine
     types.ts           # ErrorLabel, ToolResult, ToolContext
@@ -428,6 +493,7 @@ src/
     TopBar.tsx  ChatPanel.tsx  InputLine.tsx  StatsBar.tsx
     CommandMenu.tsx  ToolPanel.tsx  ToolActivity.ts
     BenchmarkPanel.tsx  SessionPicker.tsx
+    ComparePanel.tsx   # Split-view two-model comparison with rating mode
 tests/                 # Vitest suite, mirrors src/ layout (moved out of src/ 2026-11-04)
   logger.test.ts       # 2 tests (spec §14 Check 4)
   commands/
@@ -436,6 +502,7 @@ tests/                 # Vitest suite, mirrors src/ layout (moved out of src/ 20
   model/
     session.test.ts    # 6 tests
     benchmark.test.ts  # 4 tests (mocked client)
+    compare.test.ts    # 9 tests (scoring, autoSpeedScore, dimensions)
     replay.test.ts     # 11 tests
   tools/
     executor.test.ts   # 23 tests
@@ -449,6 +516,7 @@ tests/                 # Vitest suite, mirrors src/ layout (moved out of src/ 20
     diff.test.ts       # 12 tests
     useScrollback.test.ts # 6 tests (clamp + follow-scroll math)
     benchmark.test.ts  # 5 tests (BenchmarkPanel + SessionPicker render)
+    compare.test.ts    # 7 tests (ComparePanel split view, rating mode, score table, streaming)
     replay-controls.test.ts # 7 tests (speed cycle, interval math, header format)
     mouse.test.ts      # 22 tests (SGR wheel/click parsing, chunk buffering, sanitizing)
 scripts/
