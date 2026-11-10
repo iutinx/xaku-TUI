@@ -5,6 +5,8 @@ import type { Config } from '../config.js';
 export interface TestCase {
   prompt: string;
   systemPrompt: string | null;
+  expectedAnswer?: string;
+  evaluationCriteria?: string[];
 }
 
 export async function saveTestCase(
@@ -12,10 +14,16 @@ export async function saveTestCase(
   name: string,
   prompt: string,
   systemPrompt: string | null,
+  extra?: { expectedAnswer?: string; evaluationCriteria?: string[] },
 ): Promise<void> {
   mkdirSync(config.casesDir, { recursive: true });
   const filePath = path.join(config.casesDir, `${name}.json`);
-  const testCase: TestCase = { prompt, systemPrompt };
+  const testCase: TestCase = {
+    prompt,
+    systemPrompt,
+    ...(extra?.expectedAnswer ? { expectedAnswer: extra.expectedAnswer } : {}),
+    ...(extra?.evaluationCriteria?.length ? { evaluationCriteria: extra.evaluationCriteria } : {}),
+  };
   writeFileSync(filePath, JSON.stringify(testCase, null, 2), 'utf-8');
 }
 

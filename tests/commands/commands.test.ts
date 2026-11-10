@@ -96,6 +96,42 @@ describe('parseCommand', () => {
     expect(parseCommand('/benchmark').type).toBe('error');
   });
 
+  it('parses /compare with two models', () => {
+    expect(parseCommand('/compare webtest qwen3:4b,qwen3:8b')).toEqual({
+      type: 'compare',
+      name: 'webtest',
+      models: ['qwen3:4b', 'qwen3:8b'],
+    });
+  });
+
+  it('rejects /compare with only one model', () => {
+    const action = parseCommand('/compare webtest qwen3:4b');
+    expect(action.type).toBe('error');
+    if (action.type === 'error') {
+      expect(action.message).toContain('2 models');
+    }
+  });
+
+  it('rejects /compare with three models', () => {
+    const action = parseCommand('/compare webtest a,b,c');
+    expect(action.type).toBe('error');
+    if (action.type === 'error') {
+      expect(action.message).toContain('2 models');
+    }
+  });
+
+  it('rejects /compare without a case name', () => {
+    expect(parseCommand('/compare').type).toBe('error');
+  });
+
+  it('parses /compare with spaces in model list', () => {
+    expect(parseCommand('/compare mytest modelA , modelB')).toEqual({
+      type: 'compare',
+      name: 'mytest',
+      models: ['modelA', 'modelB'],
+    });
+  });
+
   it('parses /replay with and without an index', () => {
     expect(parseCommand('/replay')).toEqual({ type: 'replay' });
     expect(parseCommand('/replay 3')).toEqual({ type: 'replay', index: 3 });

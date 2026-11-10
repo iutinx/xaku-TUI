@@ -48,6 +48,11 @@ export const COMMANDS: CommandDef[] = [
     hint: '<case> [model,model,…]',
   },
   {
+    name: 'compare',
+    description: 'Compare two models side-by-side on the same test case',
+    hint: '<case> modelA,modelB',
+  },
+  {
     name: 'replay',
     description: 'Step through a past session from its log',
     hint: '[index]',
@@ -92,6 +97,7 @@ export type CommandAction =
   | { type: 'show-autoapprove' }
   | { type: 'toggle-compact' }
   | { type: 'benchmark'; name: string; models?: string[] }
+  | { type: 'compare'; name: string; models: [string, string] }
   | { type: 'replay'; index?: number }
   | { type: 'stats' }
   | { type: 'export' }
@@ -133,6 +139,16 @@ export function parseCommand(input: string): CommandAction {
         ? modelList.split(',').map((m) => m.trim()).filter(Boolean)
         : undefined;
       return { type: 'benchmark', name, models };
+    }
+    case 'compare': {
+      if (!args) return { type: 'error', message: 'Usage: /compare <case-name> modelA,modelB' };
+      const parts = args.split(/\s+/);
+      if (parts.length < 2) return { type: 'error', message: 'Usage: /compare <case-name> modelA,modelB' };
+      const name = parts[0];
+      const modelList = parts.slice(1).join(' ');
+      const models = modelList.split(',').map((m) => m.trim()).filter(Boolean);
+      if (models.length !== 2) return { type: 'error', message: '/compare requires exactly 2 models separated by a comma' };
+      return { type: 'compare', name, models: [models[0], models[1]] };
     }
     case 'replay': {
       if (!args) return { type: 'replay' };
