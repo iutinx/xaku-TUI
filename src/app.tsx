@@ -12,10 +12,12 @@ import {
 import { parseCommand } from './commands/index.js';
 import { estimateContextTokens, estimateTokens, fillMissingToolResults, toOpenAIMessages, type ConversationMessage, type UserMessage } from './model/session.js';
 import { createLogger } from './logger.js';
-import { exportSession } from './commands/report.js';
+import { exportSession, exportComparison } from './commands/report.js';
 import { saveTestCase, loadTestCase } from './commands/cases.js';
 import { runBenchmark, type BenchmarkResult } from './model/benchmark.js';
+import { runComparison, autoSpeedScore, emptyRatings, emptySide, DIMENSIONS, type CompareResult, type CompareSideResult, type CompareToolActivity, type ComparisonScore, type Dimension, type ModelRatings } from './model/compare.js';
 import { BenchmarkPanel } from './ui/BenchmarkPanel.js';
+import { ComparePanel } from './ui/ComparePanel.js';
 import { listSessions, loadSession, reconstructUpTo, type LogEvent, type SessionSummary } from './model/replay.js';
 import { formatReplaySpeed, nextSpeed, replayIntervalMs } from './ui/replay-controls.js';
 import { SessionPicker } from './ui/SessionPicker.js';
@@ -42,6 +44,23 @@ interface BenchmarkState {
   results: BenchmarkResult[];
   running: boolean;
   currentModel: string | null;
+}
+
+interface CompareState {
+  testCaseName: string;
+  leftModel: string;
+  rightModel: string;
+  running: boolean;
+  leftResult: CompareSideResult;
+  rightResult: CompareSideResult;
+  leftPartial: string;
+  rightPartial: string;
+  leftReasoning: string;
+  rightReasoning: string;
+  score?: ComparisonScore;
+  ratingMode: boolean;
+  ratingSide: 'left' | 'right';
+  ratingDimension: Dimension;
 }
 
 type ReplayState =
@@ -99,6 +118,8 @@ export default function App({ config }: AppProps) {
 
   const [bench, setBench] = useState<BenchmarkState | null>(null);
   const benchControllerRef = useRef<AbortController | null>(null);
+  const [compare, setCompare] = useState<CompareState | null>(null);
+  const compareControllerRef = useRef<AbortController | null>(null);
   const [replay, setReplay] = useState<ReplayState | null>(null);
   const [chatHeights, setChatHeights] = useState({ contentHeight: 0, containerHeight: 0 });
 
@@ -164,7 +185,7 @@ export default function App({ config }: AppProps) {
   // inside ChatPanel (which also routes clicks on reasoning headers).
   const WHEEL_ROWS = 3;
   function handleWheel(direction: 'up' | 'down') {
-    if (replay || bench) return;
+    if (replay || bench || compare) return;
     if (direction === 'up') {
       scrollback.up(WHEEL_ROWS);
     } else {
@@ -233,6 +254,56 @@ export default function App({ config }: AppProps) {
 
   useInput(
     (char, key) => {
+      if (compare) {
+        if (key.escape) {
+          if (compare.ratingMode) {
+            setCompare({ ...compare, ratingMode: false });
+          } else if (compare.running) {
+            cancelComparison();
+          } else {
+            setCompare(null);
+          }
+        } else if (compare.running) {
+          return;
+        } else if (compare.ratingMode) {
+          if (/^[1-5]$/.test(char)) {
+            const score = compare.score;
+            if (!score) return;
+            const val = Number(char);
+            if (compare.ratingSide === 'left') {
+              const newRatings = { ...score.left.ratings, [compare.ratingDimension]: val };
+              setCompare({ ...compare, score: { ...score, left: { ...score.left, ratings: newRatings } } });
+            } else {
+              const newRatings = { ...score.right.ratings, [compare.ratingDimension]: val };
+              setCompare({ ...compare, score: { ...score, right: { ...score.right, ratings: newRatings } } });
+            }
+            logger.log({ event: 'compare_rate', side: compare.ratingSide, dimension: compare.ratingDimension, value: val });
+          } else if (key.leftArrow) {
+            const idx = DIMENSIONS.indexOf(compare.ratingDimension);
+            const prev = DIMENSIONS[(idx - 1 + DIMENSIONS.length) % DIMENSIONS.length];
+            setCompare({ ...compare, ratingDimension: prev });
+          } else if (key.rightArrow) {
+            const idx = DIMENSIONS.indexOf(compare.ratingDimension);
+            const next = DIMENSIONS[(idx + 1) % DIMENSIONS.length];
+            setCompare({ ...compare, ratingDimension: next });
+          } else if (key.upArrow || key.downArrow) {
+            setCompare({ ...compare, ratingSide: compare.ratingSide === 'left' ? 'right' : 'left' });
+          } else if (key.return) {
+            const idx = DIMENSIONS.indexOf(compare.ratingDimension);
+            const next = DIMENSIONS[(idx + 1) % DIMENSIONS.length];
+            const nextSide = compare.ratingDimension === DIMENSIONS[DIMENSIONS.length - 1]
+              ? (compare.ratingSide === 'left' ? 'right' : 'left')
+              : compare.ratingSide;
+            setCompare({ ...compare, ratingDimension: next, ratingSide: nextSide });
+          }
+        } else {
+          if (char === 'r') {
+            setCompare({ ...compare, ratingMode: true });
+          }
+        }
+        return;
+      }
+
       if (replay) {
         if (key.escape) {
           setReplay(null);
@@ -381,7 +452,7 @@ export default function App({ config }: AppProps) {
         testConnection();
       }
     },
-    { isActive: generating || hasToolPrompt || connectionError || scrollActive || bench !== null || replay !== null || scrollback.isScrolled },
+    { isActive: generating || hasToolPrompt || connectionError || scrollActive || bench !== null || compare !== null || replay !== null || scrollback.isScrolled },
   );
 
   // Any typed character leaves scrollback and returns to the live tail.
@@ -392,6 +463,9 @@ export default function App({ config }: AppProps) {
       }
       if (bench && !bench.running) {
         setBench(null);
+      }
+      if (compare && !compare.running) {
+        setCompare(null);
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -555,6 +629,107 @@ export default function App({ config }: AppProps) {
     setBench((prev) => (prev ? { ...prev, running: false, currentModel: null } : prev));
     logger.log({ event: 'benchmark_cancelled' });
     addSystemMessage('Benchmark cancelled.');
+  }
+
+  function startComparison(leftModel: string, rightModel: string, testCaseName: string, testCase: { prompt: string; systemPrompt: string | null }) {
+    cleanupGeneration();
+    const controller = new AbortController();
+    compareControllerRef.current = controller;
+    setToolActivities([]);
+    setCompare({
+      testCaseName,
+      leftModel,
+      rightModel,
+      running: true,
+      leftResult: emptySide(leftModel),
+      rightResult: emptySide(rightModel),
+      leftPartial: '',
+      rightPartial: '',
+      leftReasoning: '',
+      rightReasoning: '',
+      score: undefined,
+      ratingMode: false,
+      ratingSide: 'left',
+      ratingDimension: 'accuracy',
+    });
+    addSystemMessage(`Comparison started: ${leftModel} vs ${rightModel} on "${testCaseName}". Esc cancels.`);
+    logger.log({ event: 'compare_start', case: testCaseName, left: leftModel, right: rightModel });
+
+    runComparison(leftModel, rightModel, {
+      client,
+      testCase,
+      temperature,
+      systemPrompt,
+      toolCtx: {
+        workspace: config.workspace,
+        maxResultBytes: config.maxResultBytes,
+        shellTimeoutMs: config.shellTimeoutMs,
+      },
+      signal: controller.signal,
+      onContent: (side, text) => {
+        setCompare((prev) => {
+          if (!prev) return prev;
+          const key = side === 'left' ? 'leftPartial' : 'rightPartial';
+          return { ...prev, [key]: text };
+        });
+      },
+      onReasoning: (side, text) => {
+        setCompare((prev) => {
+          if (!prev) return prev;
+          const key = side === 'left' ? 'leftReasoning' : 'rightReasoning';
+          return { ...prev, [key]: text };
+        });
+      },
+      onToolActivity: (side, activity) => {
+        setCompare((prev) => {
+          if (!prev) return prev;
+          const key = side === 'left' ? 'leftResult' : 'rightResult';
+          const current = prev[key];
+          const existing = current.toolActivities.findIndex((a) => a.id === activity.id);
+          const newActivities = [...current.toolActivities];
+          if (existing >= 0) {
+            newActivities[existing] = activity;
+          } else {
+            newActivities.push(activity);
+          }
+          return { ...prev, [key]: { ...current, toolActivities: newActivities } };
+        });
+      },
+    })
+      .then((result) => {
+        const speedScores = autoSpeedScore(result.left.tokensPerSecond, result.right.tokensPerSecond);
+        setCompare((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            running: false,
+            leftResult: result.left,
+            rightResult: result.right,
+            score: {
+              left: { model: leftModel, ratings: { ...emptyRatings(), speed: speedScores.left } },
+              right: { model: rightModel, ratings: { ...emptyRatings(), speed: speedScores.right } },
+            },
+          };
+        });
+        logger.log({
+          event: 'compare_end',
+          case: testCaseName,
+          left: leftModel,
+          right: rightModel,
+          leftTps: result.left.tokensPerSecond,
+          rightTps: result.right.tokensPerSecond,
+        });
+      })
+      .finally(() => {
+        compareControllerRef.current = null;
+      });
+  }
+
+  function cancelComparison() {
+    compareControllerRef.current?.abort();
+    setCompare((prev) => (prev ? { ...prev, running: false } : prev));
+    logger.log({ event: 'compare_cancelled' });
+    addSystemMessage('Comparison cancelled.');
   }
 
   async function openReplaySession(summary: SessionSummary) {
@@ -1110,6 +1285,25 @@ export default function App({ config }: AppProps) {
           }
           break;
         }
+        case 'compare': {
+          if (compare) {
+            addSystemMessage('Already in comparison mode (Esc to exit).');
+            break;
+          }
+          if (bench?.running) {
+            addSystemMessage('A benchmark is already running (Esc to cancel).');
+            break;
+          }
+          try {
+            const testCase = await loadTestCase(config, action.name);
+            startComparison(action.models[0], action.models[1], action.name, testCase);
+          } catch (err) {
+            addSystemMessage(
+              `Comparison failed to start: ${err instanceof Error ? err.message : String(err)}. Save a test case first with /save <name>.`,
+            );
+          }
+          break;
+        }
         case 'replay': {
           if (replay) {
             addSystemMessage('Already in replay mode (Esc to exit).');
@@ -1166,9 +1360,24 @@ export default function App({ config }: AppProps) {
         }
         case 'export': {
           try {
-            const report = await exportSession(config, messages, model, temperature, systemPrompt, stats);
-            addSystemMessage(`Report exported:\n  Markdown: ${report.mdPath}\n  JSON: ${report.jsonPath}`);
-            logger.log({ event: 'export', mdPath: report.mdPath, jsonPath: report.jsonPath });
+            if (compare && !compare.running) {
+              const report = await exportComparison(config, {
+                testCaseName: compare.testCaseName,
+                prompt: compare.leftResult.messages.find((m) => m.role === 'user')?.content ?? '',
+                systemPrompt: systemPrompt,
+                leftModel: compare.leftModel,
+                rightModel: compare.rightModel,
+                leftResult: compare.leftResult,
+                rightResult: compare.rightResult,
+                score: compare.score,
+              });
+              addSystemMessage(`Comparison report exported:\n  Markdown: ${report.mdPath}\n  JSON: ${report.jsonPath}`);
+              logger.log({ event: 'export_compare', mdPath: report.mdPath, jsonPath: report.jsonPath });
+            } else {
+              const report = await exportSession(config, messages, model, temperature, systemPrompt, stats);
+              addSystemMessage(`Report exported:\n  Markdown: ${report.mdPath}\n  JSON: ${report.jsonPath}`);
+              logger.log({ event: 'export', mdPath: report.mdPath, jsonPath: report.jsonPath });
+            }
           } catch (err) {
             addSystemMessage(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
           }
@@ -1271,6 +1480,30 @@ export default function App({ config }: AppProps) {
               </Box>
             )}
           </>
+        ) : compare ? (
+          <Box flexGrow={1} flexDirection="column">
+            <Box paddingX={1}>
+              <Text bold color="cyan">
+                Compare · {compare.testCaseName} · {compare.leftModel} vs {compare.rightModel}
+                {compare.running ? ' (Esc to cancel)' : compare.ratingMode ? ` · Rating ${compare.ratingSide === 'left' ? 'A' : 'B'} · ${compare.ratingDimension} · [1-5] rate · ←/→ dim · ↑/↓ side · Esc done` : ' · [r] rate · Esc close'}
+              </Text>
+            </Box>
+            <ComparePanel
+              leftModel={compare.leftModel}
+              rightModel={compare.rightModel}
+              leftResult={compare.leftResult}
+              rightResult={compare.rightResult}
+              running={compare.running}
+              leftPartial={compare.leftPartial}
+              rightPartial={compare.rightPartial}
+              leftReasoning={compare.leftReasoning}
+              rightReasoning={compare.rightReasoning}
+              score={compare.score}
+              ratingMode={compare.ratingMode}
+              ratingSide={compare.ratingSide}
+              ratingDimension={compare.ratingDimension}
+            />
+          </Box>
         ) : (
           <>
             <Box flexGrow={1} flexDirection="column">
@@ -1315,29 +1548,35 @@ export default function App({ config }: AppProps) {
         value={input}
         onChange={setInput}
         onSubmit={handleSubmit}
-        disabled={generating || hasToolPrompt || connectionError || (bench?.running ?? false) || replay !== null}
+        disabled={generating || hasToolPrompt || connectionError || (bench?.running ?? false) || compare !== null || replay !== null}
         placeholder={
           connectionError
             ? 'Ollama unreachable — press Enter to retry'
-            : replay?.view === 'picker'
-              ? '↑↓ select session · Enter load · Esc exit'
-              : replay?.view === 'play'
-                ? '←/→ step events · +/- speed · Space play/pause · PgUp/PgDn jump · Esc exit replay'
-                : bench?.running
-              ? 'Benchmark running — press Esc to cancel'
-              : focusedActivity
-              ? 'Press [a] approve, [d] deny this tool, [Esc] back to batch'
-              : pendingBatch.length > 1
-                ? `Press [a] approve all, [d] deny all, [1-${pendingBatch.length}] review one`
-                : pendingBatch.length === 1
-                  ? 'Press [a] approve, [d] deny, or [t] cycle auto-approve'
-                  : hasFailedTool
-                    ? 'Press [f] fix, [s] skip, or [r] retry'
-                    : generating
-                      ? 'Generating…'
-                      : maxScrollLine > 0
-                        ? 'Type a message · ↑/wheel to scroll · / for commands'
-                        : 'Type a message, or / for commands'
+            : compare?.running
+              ? 'Comparison running — press Esc to cancel'
+              : compare?.ratingMode
+                ? '[1-5] rate · ←/→ dimension · ↑/↓ side · Enter next · Esc done'
+                : compare
+                  ? 'Press [r] to rate · Esc to close'
+                  : replay?.view === 'picker'
+                    ? '↑↓ select session · Enter load · Esc exit'
+                    : replay?.view === 'play'
+                      ? '←/→ step events · +/- speed · Space play/pause · PgUp/PgDn jump · Esc exit replay'
+                      : bench?.running
+                        ? 'Benchmark running — press Esc to cancel'
+                        : focusedActivity
+                          ? 'Press [a] approve, [d] deny this tool, [Esc] back to batch'
+                          : pendingBatch.length > 1
+                            ? `Press [a] approve all, [d] deny all, [1-${pendingBatch.length}] review one`
+                            : pendingBatch.length === 1
+                              ? 'Press [a] approve, [d] deny, or [t] cycle auto-approve'
+                              : hasFailedTool
+                                ? 'Press [f] fix, [s] skip, or [r] retry'
+                                : generating
+                                  ? 'Generating…'
+                                  : maxScrollLine > 0
+                                    ? 'Type a message · ↑/wheel to scroll · / for commands'
+                                    : 'Type a message, or / for commands'
         }
       />
       <StatsBar
