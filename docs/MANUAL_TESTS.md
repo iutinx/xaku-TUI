@@ -116,56 +116,9 @@ This document describes manual testing procedures for acceptance checks that req
 
 ---
 
-## Check 7: Symbol Fallback for Terminals Without Unicode
+## Check 7: Model Label Renders as the Active Model
 
-**Objective:** Verify that xaku works in terminals without Unicode support using ASCII fallback symbols.
-
-### Test A: Automated Verification
-
-```bash
-# Run unit tests
-npx vitest run tests/ui/theme.test.ts
-```
-
-Expected: All tests pass, verifying ASCII symbol rendering.
-
-### Test B: Manual Visual Verification
-
-1. **Start xaku with plain symbols:**
-   ```bash
-   XAKU_PLAIN=1 npm run dev
-   ```
-
-2. **Send a message:**
-   ```
-   Read the file test.txt
-   ```
-
-3. **Expected symbols:**
-   - Success: `[ok]` (not `✔`)
-   - Failure: `[x]` (not `✖`)
-   - Skipped: `[skip]` (not `↓`)
-   - Tree connectors: `|-` and `` `- `` (not `├` and `└`)
-   - Spinner: `|`, `/`, `-`, `\` (not braille patterns)
-
-4. **Verify tool panel:**
-   - All status indicators use ASCII symbols
-   - Text remains readable
-   - Layout is correct
-
-### Pass Criteria
-- ✅ All Unicode symbols replaced with ASCII equivalents
-- ✅ UI remains fully functional
-- ✅ Layout and alignment correct
-- ✅ All text readable
-
----
-
-## Check 8: Continuous Scrollback + Mouse Wheel
-
-**Objective:** Verify row-level chat scrolling (keyboard and wheel) clips cleanly inside the chat pane without corrupting the rest of the screen.
-
-**Note:** mouse/trackpad events require a terminal with SGR mouse support (iTerm2, Kitty, WezTerm, Ghostty, Windows Terminal). Apple Terminal does not report the mouse — keyboard paths still apply there.
+**Objective:** Verify assistant messages and the streaming tail show the real model name, not the kit's hardcoded "Claude".
 
 ### Test Steps
 
@@ -174,72 +127,158 @@ Expected: All tests pass, verifying ASCII symbol rendering.
    npm run dev
    ```
 
-2. **Build a history that overflows the screen** (send 3–5 messages, or ask for something long):
+2. **Pick a model** in the setup menu (e.g. `qwen3:8b`).
+
+3. **Send a short message:**
    ```
-   List the first 40 prime numbers with a one-line explanation each.
+   Say hi in one word.
    ```
 
-3. **Keyboard scrolling:**
-   - Press `↑` / `↓` — content moves one row at a time
-   - Press `PgUp` / `PgDn` — moves a full screenful
-   - Banner `↑ N rows above — Esc to return` appears at the top of the chat area
-   - Press `Esc` — jumps back to the live tail, banner disappears
+4. **Expected behavior:**
+   - The streaming tail header reads `● qwen3:8b` (purple), **not** `● Claude`.
+   - After completion, the persisted assistant bubble header is still `● qwen3:8b`.
+   - The user bubble header reads `❯ You` (cyan).
+   - System messages (e.g. `Model set to …`) are dimmed with no `●`/`❯` prefix.
 
-4. **Wheel scrolling (if terminal supports SGR mouse):**
-   - Two-finger scroll / wheel up — moves ~3 rows per notch
-   - Scroll back down to the tail — streaming content auto-follows again
-
-5. **While scrolled up:**
-   - Start a new generation (`/` commands or typing snaps to the tail first)
-   - Verify the model output grows off-screen while you stay at the same rows; `Esc` returns to the live view
+5. **Switch models and re-check:**
+   ```
+   /model qwen3:4b
+   ```
+   Send another message. Header should now show `● qwen3:4b`.
 
 ### Pass Criteria
-- ✅ TopBar, InputLine, and StatsBar are never overdrawn by chat content at any scroll position (the ink 5.2 clip-rect bug must stay fixed)
-- ✅ Banner row count matches actual scroll depth
-- ✅ Tail auto-follow works while generating; scrolled-up position holds while content grows
-- ✅ Typing or sending snaps back to the bottom
-- ✅ No `[<64;…` / `[<0;…` garbage ever appears in the prompt
+- ✅ Final assistant bubble shows the actual model name
+- ✅ Streaming tail also shows the actual model name (no flash of "Claude")
+- ✅ Header updates immediately after `/model` switches
 
 ---
 
-## Check 9: Thinking Block Clickable Toggle + Ctrl+T
+## Check 8: Command Palette Alignment + Two-Enter Flow
 
-**Objective:** Verify reasoning from thinking models persists after completion as a collapsed, toggleable block.
-
-Requires a reasoning-capable model (e.g. `qwen3:4b` streams `reasoning` deltas through Ollama).
+**Objective:** Verify the slash-command palette is left-aligned, doesn't push the rest of the TUI around, and inserts on Enter rather than executing immediately.
 
 ### Test Steps
 
-1. **Start xaku and ask a step-by-step question:**
+1. **Start xaku** with the kit UI.
+
+2. **Open the palette** by typing:
    ```
-   Think step by step: a train leaves Algiers at 90 km/h… (any reasoning-heavy prompt)
+   /
    ```
+   Expected: a rounded purple-bordered panel appears between the message area and the input, listing all 14 commands. The total TUI height does not change (message viewport shrinks by exactly the palette height).
 
-2. **During generation:**
-   - Reasoning streams in muted italic text inside the model block
+3. **Filter** by typing more characters, e.g. `/te`.
+   Expected: only `/temperature` is shown, focused.
 
-3. **After completion:**
-   - Reasoning is replaced by a compact inverse-video `thinking [+]` header
-   - The answer text remains visible; reasoning body hidden
-   - No flicker or duplicated "model" label at the transition
+4. **Navigate** with ↑/↓.
+   Expected: focus indicator (`❯`) moves; arrow keys do **not** cycle input history while the palette is open.
 
-4. **Click the header:**
-   - `thinking [−]` appears with the reasoning body expanded
-   - Click again — collapses back to `thinking [+]`
-   - (If clicking does nothing in your terminal, report the terminal name/version — SGR press coordinates may not be delivered.)
+5. **Select** with Enter on `/temperature`.
+   Expected: input now reads `/temperature ` (with trailing space). Palette closes. The command has **not** executed yet.
 
-5. **Keyboard fallback:**
-   - Press `Ctrl+T` — toggles the most recent thinking block (expand/collapse)
+6. **Press Enter again.**
+   Expected: command executes — system message `Temperature set to …` appears.
 
-6. **API hygiene:**
-   - Send a follow-up message; StatsBar `context` count should not include the hidden reasoning length
+7. **Try Escape:**
+   Type `/` again, press Esc. Expected: palette hides. Type another character (or change the slash query). Palette reappears.
+
+8. **Check long descriptions:**
+   Type `/c` to filter to `/clear`, `/compact`, `/compare`.
+   Expected: command names are column-aligned; descriptions do not wrap or spill past the right border; if a description exceeds terminal width it ends in `…`.
 
 ### Pass Criteria
-- ✅ Completed thinking collapses to a `thinking [+]` button instead of vanishing
-- ✅ Click toggles expand/collapse both ways
-- ✅ `Ctrl+T` toggles the latest block
-- ✅ No prompt garbage when clicking
-- ✅ Reasoning is not re-sent to the model
+- ✅ Palette panel is bounded, left-aligned, no description wrap
+- ✅ Total TUI row count stable across palette open/close
+- ✅ First Enter inserts `/cmd `, second Enter executes
+- ✅ Esc dismisses; subsequent slash input reopens
+- ✅ ↑/↓ navigate palette (not history) while open
+
+---
+
+## Check 9: Response Animation (Typewriter + Spinner + Blinking Cursor)
+
+**Objective:** Verify streaming responses reveal letter-by-letter, show a spinner while waiting for the first token, and end with a blinking block cursor.
+
+### Test Steps
+
+1. **Start xaku**, pick a model.
+
+2. **Send a question that takes a moment to start:**
+   ```
+   Explain how HTTPS works in three short paragraphs.
+   ```
+
+3. **Before the first token arrives:**
+   - Streaming bubble header reads `● qwen3:8b is thinking…` (dim).
+   - A `⠋ ⠙ ⠹ …` spinner occupies the body slot.
+   - The header's left dot is `◐` (generating variant) instead of `◉`.
+
+4. **As tokens arrive:**
+   - Body text reveals letter-by-letter (≈3 chars every 20 ms).
+   - The spinner disappears the moment the first content frame paints.
+   - A purple `▌` cursor sits at the end of the last visible line and toggles roughly every 0.5 s.
+
+5. **When the stream ends:**
+   - Cursor disappears immediately.
+   - Header `◐` reverts to `◉`.
+   - Final bubble shows the full text once (no flicker, no duplication).
+
+6. **Cancel mid-stream:**
+   Press `Ctrl+C` while streaming.
+   - Generation stops.
+   - System message `Generation cancelled.` appears.
+   - Cursor and spinner both stop.
+
+### Pass Criteria
+- ✅ Letter-by-letter reveal during streaming
+- ✅ Spinner visible only when waiting for first content
+- ✅ Blinking cursor at end of last streaming line, disappears on completion
+- ✅ Header indicator swaps correctly between `◉`/`◐`
+- ✅ Cancel stops all animation cleanly
+
+---
+
+## Check 10: Thinking Block Visibility Toggled by Ctrl+T
+
+**Objective:** Verify reasoning from thinking-capable models is hidden by default, expandable with `Ctrl+T`, and not re-sent to the model.
+
+Requires a reasoning-capable model (e.g. `qwen3:4b` or `qwen3:8b`, which stream `reasoning` deltas through Ollama).
+
+### Test Steps
+
+1. **Start xaku** and ask something reasoning-heavy:
+   ```
+   Think step by step: a train leaves Algiers at 90 km/h, another leaves
+   Oran at 70 km/h toward each other, distance 450 km. When do they meet?
+   ```
+
+2. **After completion:**
+   - The assistant bubble shows `✻ Thinking… (Ctrl+T to expand)` (purple, dim).
+   - No reasoning text is shown by default.
+   - The answer body is visible directly below.
+
+3. **Press `Ctrl+T`:**
+   - Reasoning body appears under the `✻ Thinking…` header in dimmed text.
+   - Hint in `XakuHeader` flips to `^T hide thinking`.
+
+4. **Press `Ctrl+T` again:**
+   - Reasoning body hides; hint flips back to `^T show thinking`.
+
+5. **API hygiene:**
+   - Send a follow-up question.
+   - Header `ctx` percentage should reflect tokens **without** the hidden reasoning.
+   - The model continues the conversation coherently — reasoning is internal-only.
+
+6. **No-thinking model:**
+   Switch to a non-reasoning model (e.g. `llama3.2:3b`), ask another question.
+   - No `✻ Thinking…` header appears.
+   - `Ctrl+T` is still functional but does nothing visible.
+
+### Pass Criteria
+- ✅ Thinking collapsed by default; expandable with `Ctrl+T`
+- ✅ Header hint text correctly reflects current state
+- ✅ Hidden reasoning is not included in the next request payload
+- ✅ Non-thinking models don't show a thinking header
 
 ---
 
@@ -364,23 +403,20 @@ If the model doesn't make tool calls:
 
 ### Symbol Rendering Issues
 
-If Unicode symbols don't render:
+If Unicode symbols don't render (e.g. `●`, `✻`, `▌`, braille spinner):
 
 1. Check terminal supports Unicode:
    ```bash
    echo -e "\xe2\x9c\x94"  # Should show ✔
    ```
 
-2. Try plain mode:
-   ```bash
-   XAKU_PLAIN=1 npm run dev
-   ```
-
-3. Check TERM environment variable:
+2. Check TERM environment variable:
    ```bash
    echo $TERM
    ```
-   Should be `xterm-256color` or similar (not `dumb`)
+   Should be `xterm-256color` or similar (not `dumb`).
+
+Note: there is currently no ASCII-fallback mode — the kit UI assumes a Unicode-capable terminal. If you need plain ASCII, run inside `TERM=xterm-256color` with a font that contains braille and geometric glyphs.
 
 ---
 
@@ -391,9 +427,10 @@ Before marking v1 as complete, verify:
 - [ ] All automated acceptance tests pass (`scripts/acceptance.ts`)
 - [ ] Check 1: Tool call approval flow works (manual)
 - [ ] Check 6: Ollama disconnect handled gracefully (manual)
-- [ ] Check 7: Symbol fallback works (manual)
-- [ ] Check 8: Continuous scrollback + mouse wheel (manual, SGR-capable terminal)
-- [ ] Check 9: Thinking block click toggle + Ctrl+T (manual, reasoning model)
+- [ ] Check 7: Model label renders as the active model (manual)
+- [ ] Check 8: Command palette alignment + two-enter flow (manual)
+- [ ] Check 9: Response animation — typewriter + spinner + blinking cursor (manual)
+- [ ] Check 10: Thinking block visibility via `Ctrl+T` (manual, reasoning model)
 - [ ] Cross-platform path handling verified
 - [ ] Long-running tools can be cancelled
 - [ ] Session logs capture all events
@@ -413,5 +450,5 @@ If any manual test fails:
 
 ---
 
-**Last Updated:** 2026-11-04 — added Checks 8–9 (scrollback/mouse, thinking toggle)  
-**Test Coverage:** 9/9 checks (5 automated, 4 manual)
+**Last Updated:** 2026-11-18 — rewrote Checks 7–9 and added Check 10 to match the `@claude-code-kit/ui` migration (see [`PHASE_12_KIT_UI.md`](./PHASE_12_KIT_UI.md))
+**Test Coverage:** 10/10 checks (5 automated, 5 manual)

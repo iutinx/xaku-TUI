@@ -72,28 +72,17 @@ The workspace boundary check is cross-platform and works with:
 
 ### 3. Symbol Fallback
 
-Windows terminals may not support all Unicode symbols. xaku provides two modes:
+Windows terminals may not support all Unicode glyphs. As of Phase 12 (2026-11-18) xaku's UI uses `@claude-code-kit/ui`, which assumes a Unicode-capable terminal. The old `XAKU_PLAIN=1` ASCII-fallback mode was tied to the bespoke Ink UI and is **no longer implemented**.
 
-**Unicode mode** (default):
-- ✔ ✖ ↓ (checkmarks, crosses, arrows)
-- ⠋ ⠙ ⠹ (braille spinners)
-- ├ └ (tree connectors)
+**Symbols used by the current UI:**
+- `●` `❯` `◉` `◐` `✻` `▌` (model/user/system markers, generating indicator, thinking, blink cursor)
+- `⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏` (braille spinner during generation)
+- `█` `░` (context bar in `XakuHeader`)
+- Box-drawing borders on the `CommandPalette` (rounded corners)
 
-**Plain mode** (for terminals without Unicode support):
-```powershell
-$env:XAKU_PLAIN="1"
-npm run dev
-```
+**Recommendation**: use Windows Terminal (or any ConPTY-backed terminal with a Nerd/Powerline-capable font). Old `cmd.exe` and very minimal terminals may render these glyphs as boxes or `?`.
 
-Or set permanently:
-```powershell
-[System.Environment]::SetEnvironmentVariable('XAKU_PLAIN', '1', 'User')
-```
-
-**Plain mode symbols:**
-- `[ok]` `[x]` `[skip]`
-- `|` `/` `-` `\` (ASCII spinners)
-- `|-` `` `- `` (ASCII tree connectors)
+If your terminal cannot render braille / box-drawing, install Windows Terminal or Ghostty/WezTerm and try again before reporting a bug.
 
 ## Known Windows Issues
 
@@ -126,7 +115,7 @@ Or set permanently:
 
 **Workaround**:
 1. Use Windows Terminal (recommended)
-2. Enable plain mode: `XAKU_PLAIN=1`
+2. Use a Nerd Font or any font with braille / box-drawing glyphs
 3. Update graphics drivers
 
 ### 4. SQLite File Locking
@@ -150,11 +139,11 @@ All unit tests should pass on Windows:
 npm test
 ```
 
-Expected: 233 tests passing (18 files — unit + UI layout tests).
+Expected: 77 tests passing (6 files — engine, commands, tools, model/session, logger).
 
 ### Manual Tests
 
-> For the UI-polish flows (row scrollback + mouse wheel, thinking-block click toggle + `Ctrl+T`) follow **Check 8 and Check 9** in `docs/MANUAL_TESTS.md` — Windows Terminal supports SGR mouse reporting, so the wheel and clicks should work there.
+> For the current UI flows (command palette, response animation, model label, thinking toggle) follow **Checks 7–10** in `docs/MANUAL_TESTS.md`. Windows Terminal supports SGR mouse reporting if you later want click interaction with thinking blocks (currently not wired in the kit UI — `Ctrl+T` is the supported toggle).
 
 #### Test 1: Basic Chat
 
@@ -203,22 +192,22 @@ Expected: 233 tests passing (18 files — unit + UI layout tests).
 
 3. While command is running, press `Esc`
 4. Expected:
-   - Command is cancelled
-   - Tool panel shows "cancelled"
-   - xaku returns to input prompt
+    - Command is cancelled
+    - Tool panel shows "cancelled"
+    - xaku returns to input prompt
 
-#### Test 5: Plain Mode
+#### Test 5: Slash Command Palette
 
-1. Start xaku with plain mode:
-   ```powershell
-   $env:XAKU_PLAIN="1"
-   npm run dev
-   ```
+1. Start xaku: `npm run dev`
 
-2. Verify symbols:
-   - No Unicode characters visible
-   - All indicators use ASCII: `[ok]`, `|`, etc.
-   - Layout is correct (no misalignment)
+2. Type `/` in the input.
+   Expected: a rounded purple-bordered panel appears above the input listing all slash commands (`/model`, `/temperature`, `/system`, `/clear`, `/retry`, `/autoapprove`, `/compact`, `/benchmark`, `/compare`, `/replay`, `/stats`, `/export`, `/save`, `/load`). The TUI total height does not change.
+
+3. Use ↑/↓ to navigate, press Enter on `/model`.
+   Expected: input now reads `/model ` (with trailing space); palette closes; command has **not** executed yet.
+
+4. Press Enter again.
+   Expected: `/model` executes — model list appears in the message area.
 
 ## Troubleshooting
 
@@ -242,12 +231,14 @@ Expected: 233 tests passing (18 files — unit + UI layout tests).
 
 ### Garbled Text or Symbols
 
-**Problem**: Unicode characters display incorrectly.
+**Problem**: Unicode glyphs (`●`, `✻`, `▌`, braille `⠋⠙⠹`, box borders) display incorrectly.
 
 **Solution**:
-1. Use Windows Terminal
-2. Enable plain mode: `$env:XAKU_PLAIN="1"`
-3. Check terminal font supports Unicode (e.g., Consolas, Cascadia Code)
+1. Use Windows Terminal (recommended). Old `cmd.exe` and bare ConHost may not render braille / box-drawing.
+2. Switch to a font that contains the required glyphs (Cascadia Code, Nerd Fonts, JetBrains Mono).
+3. Verify `$env:TERM` (PowerShell: `echo $env:TERM`) is set to something like `xterm-256color` rather than `dumb`.
+
+There is currently no ASCII-fallback mode (`XAKU_PLAIN` was tied to the deleted bespoke UI and is no longer implemented).
 
 ### Database Locked Error
 
