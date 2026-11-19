@@ -87,6 +87,66 @@ export async function checkToolSupport(baseUrl: string, model: string): Promise<
   }
 }
 
+export interface ModelInfo {
+  contextLength: number;
+  supportsTools: boolean;
+}
+
+const contextLengthCache = new Map<string, number>();
+const DEFAULT_CONTEXT_LENGTH = 131072; // 128K
+
+export async function getModelContextLength(baseUrl: string, model: string): Promise<number> {
+  if (contextLengthCache.has(model)) {
+    return contextLengthCache.get(model)!;
+  }
+  
+  try {
+    const root = baseUrl.replace(/\/v1$/, '');
+    const res = await fetch(`${root}/api/show`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) {
+      contextLengthCache.set(model, DEFAULT_CONTEXT_LENGTH);
+      return DEFAULT_CONTEXT_LENGTH;
+    }
+    const data = (await res.json()) as Record<string, unknown>;
+    
+    // Try to extract context length from model_info
+    let contextLength = DEFAULT_CONTEXT_LENGTH;
+    
+    if (data.model_info && typeof data.model_info === 'object') {
+      const modelInfo = data.model_info as Record<string, unknown>;
+      // Common keys for context length
+      const ctxLen = modelInfo['general.context_length'] ?? 
+                     modelInfo['context_length'] ??
+                     modelInfo['n_ctx'];
+      if (typeof ctxLen === 'number' && ctxLen > 0) {
+        contextLength = ctxLen;
+      }
+    }
+    
+    // Also check parameters field
+    if (contextLength === DEFAULT_CONTEXT_LENGTH && data.parameters && typeof data.parameters === 'string') {
+      const match = data.parameters.match(/num_ctx\s+(\d+)/);
+      if (match) {
+        const parsed = parseInt(match[1], 10);
+        if (parsed > 0) {
+          contextLength = parsed;
+        }
+      }
+    }
+    
+    contextLengthCache.set(model, contextLength);
+    return contextLength;
+  } catch {
+    contextLengthCache.set(model, DEFAULT_CONTEXT_LENGTH);
+    return DEFAULT_CONTEXT_LENGTH;
+  }
+}
+
 export interface CompletionResult {
   content: string | null;
   reasoning: string | null;
