@@ -1,60 +1,15 @@
-export interface Symbols {
-  spinner: string[];
-  success: string;
-  failure: string;
-  skipped: string;
-  pending: string;
-  treeBranch: string;
-  treeLast: string;
-  cursor: string;
-}
-
-export function isPlainMode(): boolean {
-  if (process.env.XAKU_PLAIN === '1') return true;
-  if (process.env.TERM === 'dumb') return true;
-  return false;
-}
-
-function supportsUnicode(): boolean {
-  if (isPlainMode()) return false;
-  // Most modern terminals (including Windows Terminal) support Unicode box-drawing.
-  return true;
-}
-
-const unicodeSymbols: Symbols = {
-  spinner: ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'],
-  success: '✔',
-  failure: '✖',
-  skipped: '↓',
-  pending: '○',
-  treeBranch: '├',
-  treeLast: '└',
-  cursor: '▌',
-};
-
-const plainSymbols: Symbols = {
-  spinner: ['|', '/', '-', '\\'],
-  success: '[ok]',
-  failure: '[x]',
-  skipped: '[skip]',
-  pending: '[ ]',
-  treeBranch: '|-',
-  treeLast: '`-',
-  cursor: '|',
-};
-
-export function getSymbols(): Symbols {
-  return supportsUnicode() ? unicodeSymbols : plainSymbols;
-}
-
-export const symbols = getSymbols();
-
-export const theme = {
-  primary: 'cyan',
-  success: 'green',
-  failure: 'red',
-  warning: 'yellow',
-  muted: 'gray',
-  text: 'white',
-  spinner: 'cyan',
+export const colors = {
+  accent: '#BD5579',
+  accentDim: '#601D49',
+  accentBright: '#EA9D9D',
+  highlight: '#FFEBB8',
+  success: '#EA9D9D',
+  error: '#BD5579',
+  warning: '#FFEBB8',
+  text: '#E0E0E0',
+  dimText: '#666666',
+  border: '#444444',
+  background: '#0a0a0a',
 } as const;
+
+export type Color = (typeof colors)[keyof typeof colors];

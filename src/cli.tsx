@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
-import { render } from 'ink';
+import { render } from '@claude-code-kit/ink-renderer';
+import React from 'react';
 import App from './app.js';
 import { buildConfig } from './config.js';
-import { DISABLE_MOUSE } from './ui/mouse.js';
 
 const program = new Command();
 
@@ -23,7 +23,6 @@ program
 const [workspaceArg] = program.args;
 const options = program.opts();
 
-// ANSI escape codes: take over the terminal like Claude Code / opencode.
 const ENTER_ALT_SCREEN = '\x1b[?1049h';
 const LEAVE_ALT_SCREEN = '\x1b[?1049l';
 const CLEAR_SCREEN = '\x1b[2J\x1b[H';
@@ -35,7 +34,7 @@ buildConfig(workspaceArg, options)
     const cleanup = () => {
       if (cleaned) return;
       cleaned = true;
-      process.stdout.write(DISABLE_MOUSE + LEAVE_ALT_SCREEN + SHOW_CURSOR);
+      process.stdout.write(LEAVE_ALT_SCREEN + SHOW_CURSOR);
     };
 
     process.on('exit', cleanup);
@@ -54,11 +53,7 @@ buildConfig(workspaceArg, options)
     });
 
     process.stdout.write(ENTER_ALT_SCREEN + CLEAR_SCREEN);
-    const app = render(<App config={config} />);
-    app.waitUntilExit().then(() => {
-      cleanup();
-      process.exit(0);
-    });
+    void render(React.createElement(App, { config }));
   })
   .catch((err) => {
     console.error(err instanceof Error ? err.message : String(err));
