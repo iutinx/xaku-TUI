@@ -8,9 +8,6 @@
  */
 
 import { execSync } from 'node:child_process';
-import { existsSync, readFileSync, unlinkSync } from 'node:fs';
-import { readdir } from 'node:fs/promises';
-import path from 'node:path';
 
 const PASS = '✓';
 const FAIL = '✗';
@@ -37,9 +34,7 @@ function recordResult(name: string, status: 'pass' | 'fail' | 'manual' | 'skip',
 async function runUnitTests() {
   log('\n📋 Running unit tests for automated checks...\n');
   try {
-    execSync('npx vitest run tests/logger.test.ts src/commands/report.test.ts src/ui/theme.test.ts src/tools/executor.test.ts', {
-      stdio: 'pipe'
-    });
+    execSync('npx vitest run', { stdio: 'pipe' });
     return true;
   } catch {
     return false;
@@ -64,11 +59,12 @@ async function checkMalformedToolCalls() {
 
 async function checkWorkspaceBoundary() {
   log('\n🔍 Check 3: File paths outside workspace are blocked');
-  log('   Running workspace boundary tests...');
-  
-  // Covered by executor.test.ts which tests path resolution
+  log('   Running workspace boundary + path tests...');
+
+  // executor.test.ts covers resolveWithinWorkspace escapes; path.test.ts covers
+  // cross-platform separators; workspace.test.ts covers /cd resolution + realpath.
   try {
-    execSync('npx vitest run tests/tools/executor.test.ts', { stdio: 'pipe' });
+    execSync('npx vitest run tests/tools/executor.test.ts tests/tools/path.test.ts tests/tools/workspace.test.ts', { stdio: 'pipe' });
     recordResult('Workspace boundary enforcement', 'pass', 'Covered by unit tests');
   } catch {
     recordResult('Workspace boundary enforcement', 'fail', 'Unit tests failed');
@@ -114,15 +110,11 @@ async function checkOllamaDisconnect() {
 
 async function checkSymbolFallback() {
   log('\n🔍 Check 7: Symbol fallback for terminals without Unicode');
-  log('   Running theme tests...');
-  
-  try {
-    execSync('npx vitest run tests/ui/theme.test.ts', { stdio: 'pipe' });
-    recordResult('Symbol fallback (XAKU_PLAIN=1)', 'pass', 'Verified by unit tests');
-    log('   Manual verification: XAKU_PLAIN=1 npm run dev');
-  } catch {
-    recordResult('Symbol fallback (XAKU_PLAIN=1)', 'fail', 'Unit tests failed');
-  }
+  log('   NOT IMPLEMENTED since Phase 12. The XAKU_PLAIN=1 ASCII fallback lived in');
+  log('   the bespoke Ink UI (src/ui/theme.ts getSymbols/isPlainMode) and was deleted');
+  log('   with it; @claude-code-kit/ui assumes a Unicode-capable terminal.');
+  log('   Reporting as skipped rather than passing a check that no longer exists.');
+  recordResult('Symbol fallback (XAKU_PLAIN=1)', 'skip', 'Dropped in the Phase 12 kit migration — needs re-implementation');
 }
 
 async function checkToolCallFlow() {
@@ -135,6 +127,29 @@ async function checkToolCallFlow() {
   log('   4. Press "a" to approve');
   log('   5. Verify: File contents appear in response');
   recordResult('Tool call approval flow', 'manual', 'Requires Ollama');
+}
+
+async function checkCommandDispatch() {
+  log('\n🔍 Check 8: Every registered command is actually handled');
+  log('   Running command dispatch completeness tests...');
+
+  // Phase 12 deleted several command engines but left them registered, so 7 of 14
+  // commands printed "Unknown command". parseCommand-level tests stayed green because
+  // nothing asserted the dispatcher covered the actions it produced.
+  try {
+    execSync('npx vitest run tests/commands/commands.test.ts', { stdio: 'pipe' });
+    recordResult('Command dispatch completeness', 'pass', 'Registry, parser and dispatcher agree');
+  } catch {
+    recordResult('Command dispatch completeness', 'fail', 'A registered command has no handler (or vice versa)');
+  }
+}
+
+async function checkRealTui() {
+  log('\n🔍 Check 9: Commands work in a real terminal (not just the parser)');
+  log('   Drives the live TUI through a PTY and asserts on artifacts it produces');
+  log('   (session-log events, /export and /save files). Needs Ollama running.');
+  log('   Run: python3 scripts/pty-smoke.py');
+  recordResult('Real-TUI command coverage', 'manual', 'scripts/pty-smoke.py');
 }
 
 async function main() {
@@ -159,6 +174,8 @@ async function main() {
   await checkExportStatsConsistency();
   await checkOllamaDisconnect();
   await checkSymbolFallback();
+  await checkCommandDispatch();
+  await checkRealTui();
   
   log('\n═══════════════════════════════════════════════════════════');
   log('Summary:\n');
@@ -166,15 +183,19 @@ async function main() {
   const passed = results.filter(r => r.status === 'pass').length;
   const failed = results.filter(r => r.status === 'fail').length;
   const manual = results.filter(r => r.status === 'manual').length;
-  
+  const skipped = results.filter(r => r.status === 'skip').length;
+
   log(`  ✓ Passed: ${passed}`);
   log(`  ✗ Failed: ${failed}`);
   log(`  ⚠ Manual: ${manual} (require Ollama)`);
+  log(`  ○ Skipped: ${skipped} (not implemented)`);
   log(`  Total:  ${results.length}`);
-  
+
   if (failed > 0) {
     log('\n❌ Some checks failed. Review the output above.\n');
     process.exit(1);
+  } else if (skipped > 0) {
+    log('\n⚠️  Automated checks passed, but some acceptance criteria are not implemented (see Skipped above).\n');
   } else if (manual > 0) {
     log('\n⚠️  Automated checks passed. Manual verification needed for full acceptance.\n');
   } else {
