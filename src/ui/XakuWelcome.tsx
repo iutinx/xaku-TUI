@@ -6,9 +6,11 @@ interface XakuWelcomeProps {
   model: string;
   connected: boolean;
   temperature: number;
+  /** Abbreviated launch directory. */
+  workspace?: string;
 }
 
-export function XakuWelcome({ model, connected, temperature }: XakuWelcomeProps) {
+export function XakuWelcome({ model, connected, temperature, workspace }: XakuWelcomeProps) {
   return (
     <Box flexDirection="column" gap={1} marginTop={1} marginLeft={1}>
       <XakuLogo />
@@ -29,6 +31,13 @@ export function XakuWelcome({ model, connected, temperature }: XakuWelcomeProps)
           <Text color={colors.accentBright}>{model || 'auto'}</Text>
           <Text color={colors.dimText}>· temp {temperature.toFixed(1)}</Text>
         </Box>
+
+        {workspace && (
+          <Box gap={1}>
+            <Text color={colors.dimText}>⌂ workspace:</Text>
+            <Text color={colors.accentBright}>{workspace}</Text>
+          </Box>
+        )}
         
         <Box flexDirection="column" gap={0} marginTop={1}>
           <Text color={colors.dimText}>Quick start:</Text>

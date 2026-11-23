@@ -8,6 +8,8 @@ import { listInstalledModels, type InstalledModel } from '../model/ollama.js';
 interface XakuMenuProps {
   baseUrl: string;
   currentModel: string;
+  /** Launch directory, shown in the status panel so the user sees where tools will run. */
+  workspace?: string;
   onModelSelect: (model: string) => void;
   onDismiss: () => void;
 }
@@ -32,7 +34,7 @@ function formatAge(dateStr: string): string {
   return `${Math.floor(diffDays / 365)}y`;
 }
 
-export function XakuMenu({ baseUrl, currentModel, onModelSelect, onDismiss }: XakuMenuProps) {
+export function XakuMenu({ baseUrl, currentModel, workspace, onModelSelect, onDismiss }: XakuMenuProps) {
   const [models, setModels] = useState<InstalledModel[]>([]);
   const [loading, setLoading] = useState(true);
   const [connected, setConnected] = useState(false);
@@ -121,6 +123,13 @@ export function XakuMenu({ baseUrl, currentModel, onModelSelect, onDismiss }: Xa
           )}
         </Box>
 
+        {workspace && (
+          <Box>
+            <Text color={colors.dimText}>⌂ workspace </Text>
+            <Text color={colors.accentBright}>{workspace}</Text>
+          </Box>
+        )}
+
         {!connected && models.length === 0 && (
           <Box marginTop={1}>
             <Text color={colors.dimText}>Press r to refresh</Text>
@@ -167,7 +176,7 @@ export function XakuMenu({ baseUrl, currentModel, onModelSelect, onDismiss }: Xa
         })()}
 
         <Box marginTop={1}>
-          <Text color={colors.dimText}>↑↓ choose   ⏎ start   r refresh   esc quit</Text>
+          <Text color={colors.dimText}>↑↓ choose   ⏎ start   r refresh   esc skip</Text>
         </Box>
       </Box>
     </Box>
