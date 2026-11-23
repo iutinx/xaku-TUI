@@ -2,7 +2,7 @@
 
 A living record of everything discussed and built for xaku, the terminal workspace for chatting with, stress-testing, and reviewing local Ollama models. Keep this file updated as phases complete.
 
-Last updated: 2026-11-18 (Phase 12 — UI migrated to `@claude-code-kit/ui`, command palette, animation, thinking toggle; 77 tests passing). **The bespoke Ink UI described throughout §5–§8 below was deleted in this migration; see [`PHASE_12_KIT_UI.md`](./PHASE_12_KIT_UI.md) for the current architecture.** Historical entries below are kept for the record.
+Last updated: 2026-11-19 (Phase 13 — repaired the 8 slash commands the Phase 12 migration silently unhooked, restored the tool-activity subsystem, added workspace-path visibility + `/cd` + `/pwd`; 150 tests passing). See [`PHASE_13_COMMAND_REPAIR.md`](./PHASE_13_COMMAND_REPAIR.md) for the full record. **The bespoke Ink UI described throughout §5–§8 below was deleted in Phase 12; see [`PHASE_12_KIT_UI.md`](./PHASE_12_KIT_UI.md) for the current architecture.** Historical entries below are kept for the record.
 
 ---
 
@@ -413,39 +413,91 @@ User feedback: *"the text format he is trying to apply does not work"* — model
 
 **Status**: Implementation complete, typecheck and tests pending verification (Node.js environment issue during development).
 
+### Phase 13 — Command repair + workspace visibility
+
+> The Phase 12 "Status: ✅ Complete" above was optimistic. Its `switch`-based dispatcher only
+> handled 8 action types while the registry still produced 16, so most commands had quietly
+> stopped doing anything. See [`PHASE_13_COMMAND_REPAIR.md`](./PHASE_13_COMMAND_REPAIR.md).
+
+**1. Diagnosed and repaired the dead commands**:
+- `/export`, `/save`, `/load`, `/autoapprove`, `/compact` were registered and parsed but had no handler; they fell through to `Unknown command: ${action.type}`. `/benchmark`, `/compare`, `/replay` had lost their engines and panels entirely.
+- The three engine-less commands were **deregistered** (parser, registry, action union) so the palette no longer advertises broken things. Re-implementation is tracked as follow-up.
+- The remaining five were wired up. `src/commands/report.ts` was rebuilt for `/export` (Markdown + JSON); `src/commands/cases.ts` turned out to have been sitting unused on disk the whole time and just needed importing.
+
+**2. Made the dispatcher total so this cannot recur**:
+- `handleSubmit`'s `switch` → `commandHandlers: Record<CommandAction['type'], handler>`. A new action type without a handler is now a **compile error**.
+- `HANDLED_ACTION_TYPES` + a conditional-type assertion pin the handler set to the action union.
+- `tests/commands/commands.test.ts` asserts both directions (registered ⇒ handled, handled ⇒ reachable) and that no registered command falls through to the typo suggestion. Writing it immediately surfaced two more drift bugs: a `noop` action nothing produced (deleted), and `/cancel` being handled but never registered, so it was invisible in the palette.
+- `{ type: 'error' }` gained a handler — usage errors like `/temperature` with no argument were printing "Unknown command: error" instead of their usage string.
+
+**3. Restored the tool-activity subsystem** (spec §8.3/§9, lost with `ToolPanel.tsx`):
+- New `src/tools/activity.ts` (pure): `ToolActivity` model, terminal-status classification, `countActivities`, `averageToolDuration`, compact split/summarize, `shouldAutoApprove(mode, readOnly)` — the read-only flag comes from `ToolDefinition.isReadOnly`, not a duplicated name list.
+- New `src/ui/ToolPanel.tsx`: status icons, tool + args, `format check: ✔/✖`, durations, auto-approved markers, diff previews, and collapsed per-outcome rows (`[c]` hotkey / `/compact`).
+- **`[f] fix / [s] skip / [r] retry`** restored — failures pause and ask instead of silently feeding an error back (spec §9 forbids auto-retry).
+- Malformed calls now **pause the turn** instead of `continue`-ing a dangling `tool_calls` into the next request.
+- `ToolContext.abortSignal` is finally populated (it had been declared and honoured by `run_shell`/`query_db` but never passed), so Ctrl+C interrupts a running tool. Per-activity controllers tracked in a map.
+- Approved tools execute concurrently via `Promise.all`; results appended in original `tool_calls` order.
+- Auto-approve modes became real: `--auto-approve` / `XAKU_AUTO_APPROVE` / `/autoapprove` / "always allow" all set the same state, shown as `auto:<mode>` in the status line.
+- `write_file` diff previews rebuilt via new `src/ui/diff.ts` over the `diff` package (the dependency had stayed in `package.json`, unused since Phase 12).
+- `/stats` rebuilt off the shared `computeStats()` — model, workspace, tokens, tok/s, tool outcomes, avg tool time, log path. `/export` reads the same function, which is what makes spec §14 Check 5 ("report matches `/stats`") true by construction rather than by convention.
+
+**4. Two more bugs found only by driving the real TUI** (`scripts/pty-smoke.py`):
+- **The input never cleared.** Phase 12 dropped the kit's `REPL`, which used to `setInputValue("")` before `onSubmit`. With the value lifted into `App` and `PromptInput` fully controlled, submitted text stayed in the box and the next message *appended to it*. `handleSubmit` now clears explicitly.
+- **The palette could not reach most commands.** `CommandPalette` rendered `suggestions.slice(0, 6)` regardless of `selectedIndex`; with 14 commands the cursor moved onto rows 6–13 that were never painted, selecting invisible commands. New pure `windowStart()` scrolls the window to keep focus visible, with `↑ n above` / `↓ n more` indicators counted into `viewportHeight` so total TUI height stays stable.
+
+**5. Workspace visibility (the new feature work)**:
+- New `src/tools/workspace.ts` (pure): `expandHome`, `abbreviateHome`, `resolveWorkspace`, `relativeToWorkspace`.
+- **Header segment**: `⌂ ~/path` in `XakuHeader`, left-truncated (`…/src/ui`) to keep the leaf readable and bounded on narrow terminals.
+- **`/cd <path>`**: changes the workspace mid-session. Relative paths resolve against the current workspace, `~` expands, target must be a directory, `realpath` applied so the stored value matches what the tool sandbox compares against. Refused while a generation or approval prompt is live; logged as `set_workspace` / `workspace_error`.
+- **`/pwd`**: current workspace plus the original launch directory.
+- **Relative paths in tool previews** — approval shows `read README.md`, not a long absolute path; paths outside the workspace stay absolute so a sandbox escape is visible.
+- **Startup line** — `Workspace: <path> · Model: <model>` on launch and after the menu pick; also shown in `XakuMenu` and `XakuWelcome`.
+- **Click-to-copy** — header segment writes the path via OSC 52 (works over SSH) with `pbcopy`/`clip`/`wl-copy`/`xclip`/`xsel` fallbacks (`src/ui/clipboard.ts`), flashing `copied ✓`. This required moving alt-screen ownership out of `cli.tsx` into the kit's `<AlternateScreen>`: the renderer only enables SGR mouse tracking when it *knows* it is in the alt screen, which it learns solely from that component.
+- `XakuMenu` said `esc quit` but Escape only dismisses it; label corrected to `esc skip`.
+
+**Design note — why `/cd` is App state, not config**: `client` and `logger` were `useMemo`'d on `[config]`. Mutating `config.workspace` would have re-created the logger and opened a **second session log mid-session**, splitting the record `/export` reads. Workspace is now its own `useState`, `logger` is created exactly once, and tool calls read it through a ref so an in-flight turn stays consistent.
+
+**Acceptance harness**: `scripts/acceptance.ts` had been pointing at deleted test files (`src/commands/report.test.ts`, `src/ui/theme.test.ts`) and would have reported false results. Paths corrected, Check 7 (symbol fallback) now reports **skip** instead of pretending to pass — `XAKU_PLAIN=1` died with the bespoke UI — and new Check 8 (dispatch completeness) plus Check 9 (real-TUI PTY sweep) were added. The summary now counts skips, which previously vanished from the totals.
+
+**Tests**: 69 new (150 total, all passing across 13 files): `tests/tools/activity.test.ts` (16), `tests/tools/workspace.test.ts` (19), `tests/ui/diff.test.ts` (11), `tests/commands/report.test.ts` (12), `tests/ui/clipboard.test.ts` (7), `tests/ui/toolpanel.test.ts` (5), `tests/ui/command-palette.test.ts` (6, new file), plus the rewritten `tests/commands/commands.test.ts`.
+
+**Still open**: batch approval is sequential again (the Phase 11 `[1]..[9]` review flow was not restored); per-message thinking remains one global toggle; no ASCII fallback; `/compare` + `/benchmark` + `/replay` await re-implementation; click-to-copy needs confirmation in a real terminal (the PTY harness cannot assert clipboard contents).
+
 ## 5. Current State
 
-**Working & verified** (typecheck ✅, 233 tests ✅, PTY smoke ✅, real Ollama ✅ with qwen3:4b, spec §14 harness ✅):
-- Fullscreen TUI: top bar, chat with live streaming + reasoning display, input with cursor/editing, stats bar pinned to the bottom.
-- Responsive resize: expand/widen/shrink repaints cleanly.
-- Streaming chat via Ollama; tok/s + context counters; connection status with retry.
+**Working & verified** (typecheck ✅, 150 tests ✅, PTY command sweep ✅, real Ollama ✅ with qwen3:4b):
+- Fullscreen TUI on `@claude-code-kit/ui`: header (model, ctx bar, tokens, tool counts, git branch, workspace), virtualized message list, divider, command palette, input, status line. Alt screen + SGR mouse owned by `<AlternateScreen>` since Phase 13.
+- Streaming chat via Ollama with letter-by-letter reveal, spinner before the first token, blinking `▌` cursor, and `◉`/`◐` generation indicator.
+- Connection status with reconnect-on-Enter; a 404 is reported as a model error without flipping the connection badge.
 - No hardcoded default model: silent auto-select of first installed model, `XAKU_MODEL` env or `-m` override, warn+fallback only for explicit-missing.
-- Session logging (JSONL, crash-safe) with proper `session_end` on exit.
-- All five tools: `read_file`, `list_dir`, `write_file`, `run_shell`, `query_db` — with workspace boundary (path + realpath), approval flow, fix/skip/retry choices.
-- Cancellation: `/cancel` or `Esc` aborts in-flight generation AND running shell/database tools via per-tool `AbortController`.
-- All nine slash commands: `/model`, `/temperature`, `/system`, `/clear`, `/retry`, `/stats`, `/export`, `/save`, `/load` — plus `/autoapprove` (alias `/auto`, Phase 9) and `/compact` (Phase 10).
-- Command autocomplete palette with filtering, aliases, keyboard nav.
-- Tool error flow: `fix` feeds error back to model, `retry` re-executes and resumes, `skip` sends skip message — all logged.
-- Markdown rendering for assistant messages: headings, bold/italic, inline code, code blocks with syntax highlighting, lists, blockquotes, tables, links, images (as `[image: alt]`), strikethrough — plus LaTeX stripping with Unicode symbol substitution.
-- Source organized into `src/commands/`, `src/model/`, `src/tools/`, `src/ui/` subfolders with 4 top-level files.
-- Spec §14 acceptance harness: 5/7 checks automated, 2 require manual verification with Ollama (documented in `MANUAL_TESTS.md`).
-- Safe `/retry` / cancel / fix-skip-retry with in-flight tools: generation-epoch guard stops stale loops from clobbering state; dangling tool calls are auto-filled before any new request (old turns kept as context).
-- Auto-approve modes (`none` / `read-only` / `all`) via `--auto-approve`, `XAKU_AUTO_APPROVE`, `/autoapprove`, and the `[t]` hotkey; TopBar/ToolPanel indicators; all decisions logged.
-- Live streaming markdown: partial output renders through the markdown pipeline with `preprocessStreaming` closing unclosed fences/spans/emphasis.
-- Collapsible tool panel: `c` hotkey / `/compact` collapses completed activities to per-outcome summaries; actionable ones always stay expanded.
-- Animated tool spinners: non-terminal activities tick through the braille frames via `useSpinnerFrame` (shared with StatsBar, 80 ms cadence, interval only while something is active).
+- Session logging (JSONL, crash-safe, append-per-event) with `session_end` on exit; `toolCallId` on tool events.
+- All five tools: `read_file`, `list_dir`, `write_file`, `run_shell`, `query_db` — workspace boundary (path + realpath), full preview before approval, result trimming at 100 KB, read-only SQLite, 30 s shell timeout.
+- Tool activity list (`ToolPanel`): status icon, tool + workspace-relative args, format-check line, duration, auto-approved marker, and `[c]` collapse of completed rows.
+- Approval flow via kit `PermissionRequest` (allow / always-allow / deny); "always allow" sets `auto:all` consistently with `/autoapprove`.
 - `write_file` approval previews show a colored line diff (capped 40 lines, exact counts, new-file and too-large fallbacks); existing content probed workspace-safely before prompting.
-- Scrollback: continuous row-level scrolling like Claude Code/opencode — ↑/↓ by row, PgUp/PgDn by screenful, trackpad/mouse wheel by 3 rows (SGR mouse reporting, silently inactive where unsupported). The chat renders bottom-anchored (`column-reverse` + negative-margin shift) with exact heights from `measureElement`, so long messages scroll smoothly and long histories never break layout; tail auto-follows new content, `↑ N rows above — Esc to return` banner while scrolled, typing or sending snaps back to the tail. Mouse bytes are stripped before prompt insertion so wheel/click events can't type garbage.
-- Message styling: uniform 1-row `gap` between all messages (no per-message margins anywhere); user messages render in a rounded cyan bordered block, model output stays clean left-aligned. Reasoning from thinking models is stored on the assistant message but **collapsed by default** — the inverse-video `thinking [+]` header is a button: click it (SGR press mapped through measured row heights, ±1 tolerance) to expand to `thinking [−]`, click again to retract; `Ctrl+T` toggles the most recent thinking as a keyboard fallback. Reasoning is never sent back to the API.
-- Batch tool approval: multiple concurrent tool calls prompt together — `[a]/[d]` for the whole batch, `1-9` to review one, `t` releases newly-covered pending tools instantly; approved tools execute in parallel with results returned in tool_calls order.
-- Model benchmarking: `/benchmark <case> [models]` runs a saved test case across models with auto-approval, streams a live comparison table (time, tok/s, tools, ok/fail, tool ms, length), Esc cancels, failures become inline error rows.
-- Model comparison: `/compare <case> modelA,modelB` runs two models in parallel on the same test case, shows a split-view with live streaming responses, tool activity per side, and per-dimension rating mode (1–5 for accuracy/speed/toolCorrectness/instructionFollowing) after completion; `speed` is auto-scored from measured tok/s. `/export` produces a comparison report (Markdown + JSON).
-- Session replay: `/replay` picks from past session logs (or `/replay <index>`), step-through playback (←/→ events, PgUp/PgDn ends, Esc exits) reusing ChatPanel/ToolPanel; auto-play with `Space`/`p`, speeds 1x/2x/4x/8x via `+`/`-` (manual steps pause, end-of-log auto-pauses); logs now carry `toolCallId` on all tool events plus capped output on success.
+- Tool error flow restored: `[f] fix` feeds the error back to the model, `[s] skip` continues, `[r] retry` re-executes — the app never auto-retries (spec §9). Malformed calls pause the turn instead of leaking a dangling `tool_calls` into the next request.
+- Tool cancellation: `Ctrl+C` aborts the stream **and** running shell/database tools via per-activity `AbortController` (`ToolContext.abortSignal` is finally populated).
+- Auto-approve modes (`none` / `read-only` / `all`) via `--auto-approve`, `XAKU_AUTO_APPROVE`, `/autoapprove`, and always-allow; driven by the registry's `isReadOnly` flag; status line shows `auto:<mode>`; all decisions logged.
+- Approved tools in one turn execute concurrently; results appended in original `tool_calls` order.
+- Safe `/retry` / cancel / fix-skip-retry with in-flight tools: generation-epoch guard stops stale loops from clobbering state; dangling tool calls are auto-filled by `fillMissingToolResults` before any new request.
+^- 14 slash commands, all dispatched through a type-exhaustive handler map: `/model`, `/temperature`, `/system`, `/clear`, `/retry`, `/cancel`, `/autoapprove` (alias `/auto`), `/compact`, `/cd`, `/pwd`, `/stats`, `/export`, `/save`, `/load`.
+- Command palette: filters on prefix + aliases, rounded purple border, aligned name column, truncated descriptions, `windowStart()` scroll window so every command is reachable, two-Enter select-then-execute.
+- Reasoning from thinking models is stored on the assistant message, **collapsed by default**, toggled globally with `Ctrl+T`; never re-sent to the API.
+- **Workspace visibility**: launch path in the header (`⌂`, left-truncated), the setup menu, the welcome screen and a startup line; `/cd` changes it mid-session (relative to current, `~` expanded, `realpath`ed, refused while a turn is live); `/pwd` shows current + launch directory; tool previews show workspace-relative paths with absolute paths preserved for escapes; click the header segment to copy via OSC 52 with native fallbacks.
+- Spec §14 acceptance harness (`scripts/acceptance.ts`): 6 automated, 2 manual, 1 honestly reported as **skip** (symbol fallback, dropped in Phase 12). Corrected from a version that pointed at deleted test files.
+- Source organized into `src/commands/`, `src/model/`, `src/tools/`, `src/ui/` subfolders with 4 top-level files.
+
+**Known regressions still open from Phase 12** (not repaired here — see `PHASE_13_COMMAND_REPAIR.md` follow-ups):
+- **Markdown + syntax highlighting for assistant messages is gone.** `MarkdownText.tsx` and `code-highlight.ts` were deleted; messages now render as plain text. Spec §7 / the Phase 7 work no longer applies. (`marked` and `highlight.js` remain unused dependencies in `package.json`.)
+- **Row-level scrollback + mouse wheel are gone.** Replaced by the kit `MessageList`'s `viewportHeight` virtualization; there is no ↑/↓ history scroll and no `Esc`-returns-to-tail banner.
+- **Batch approval is sequential.** Multiple tool calls in a turn prompt one at a time; the Phase 11 `[1]..[9]` per-item review flow was not restored.
+- `/benchmark`, `/compare`, `/replay` are deregistered pending engine re-implementation.
+- No ASCII/symbol fallback (`XAKU_PLAIN=1` was tied to the deleted UI).
 
 **Pending**:
-- Manual TTY pass for the interactive batch-approval flow (scripted PTY harness flaky in this environment; logic covered by automated tests).
-- Manual TTY pass for mouse-wheel scrolling and clicking the `thinking [+/−]` toggle (SGR reporting can't be exercised headlessly; buffered parser, sanitizer, row-mapping, and layout math are covered — 233 tests). Procedures: `docs/MANUAL_TESTS.md` Check 8–9.
-- Windows manual verification (all 233 tests + install flow on a real Windows box; CI Windows runner recommended).
+- Manual TTY pass for click-to-copy and the approval/diff flow (the PTY harness drives keys and checks artifacts, but cannot assert clipboard contents or judge visual layout).
+- Manual pass of Checks 1 and 6 in `MANUAL_TESTS.md` (live tool call + Ollama disconnect).
+- Windows manual verification (all 150 tests + install flow on a real Windows box; CI Windows runner recommended).
 - Cross-platform CI (GitHub Actions matrix: macOS/Windows/Linux).
 
 ## 6. Later (designed for, per spec §15)
@@ -458,77 +510,66 @@ User feedback: *"the text format he is trying to apply does not work"* — model
 ```
 src/
   app.tsx              # state machine: chat loop, batch tool approvals, auto-approve modes, benchmark & replay modes, commands, hotkeys, cancellation, generation-epoch guard, scrollback routing
-  cli.tsx              # entry, alt-screen takeover, flags
+  cli.tsx              # entry, flags; renders <AlternateScreen><App/></AlternateScreen> (owns alt screen + mouse)
   config.ts            # flags/env/defaults → Config (workspace, limits, paths, autoApprove)
-  logger.ts            # JSONL session log
+  logger.ts            # JSONL session log, created once per app lifetime
   commands/            # Slash command system
-    index.ts           # Command registry + parser (previously src/commands.ts)
+    index.ts           # Registry + parser + CommandAction union + HANDLED_ACTION_TYPES contract
     cases.ts           # /save & /load test case persistence
-    report.ts          # /export: Markdown + JSON report builder
+    report.ts          # computeStats (shared by /stats + /export) + Markdown/JSON report builder
   model/               # Model connection layer
-    ollama.ts          # Streaming client (abort-signal aware), model list, /api/show tool-support
-    session.ts         # Message types (incl. UI-only reasoning on assistant), token estimation, fillMissingToolResults
-    benchmark.ts       # Sequential multi-model benchmark runner with metrics accumulation
-    compare.ts         # Parallel two-model comparison with scoring types and auto-speed scoring
-    replay.ts          # JSONL session log parsing + display reconstruction for replay
+    ollama.ts          # Streaming client (abort-signal aware), model list, /api/show tool-support + context length
+    session.ts         # Message types (incl. UI-only reasoning), token estimation, fillMissingToolResults
+    # NOTE: benchmark.ts / compare.ts / replay.ts were deleted in Phase 12 and their
+    # commands are deregistered until re-implemented.
   tools/               # Tool engine
-    types.ts           # ErrorLabel, ToolResult, ToolContext
-    utils.ts           # resolveWithinWorkspace (path+realpath), trimOutput, probeExistingFile (diff pre-read, 200KB cap)
+    types.ts           # ErrorLabel, ToolResult, ToolContext (incl. abortSignal)
+    activity.ts        # Pure ToolActivity state machine: statuses, counts, compact split, shouldAutoApprove
+    workspace.ts       # expandHome, abbreviateHome, resolveWorkspace, relativeToWorkspace (/cd + display)
+    utils.ts           # resolveWithinWorkspace (path+realpath), trimOutput, probeExistingFile (200KB cap)
     registry.ts        # tool defs (read_file, list_dir, write_file, run_shell, query_db) + isReadOnly flags
     read_file.ts       # + workspace boundary, trimming
     list_dir.ts
     write_file.ts      # + auto-create parent dirs
-    run_shell.ts       # + timeout, output cap, cross-platform
-    query_db.ts        # + better-sqlite3 read-only
+    run_shell.ts       # + timeout, output cap, abortSignal, cross-platform
+    query_db.ts        # + better-sqlite3 read-only, abort checks
     executor.ts        # validate / execute / getToolDefinitions
-  ui/                  # UI components
-    theme.ts           # listr2-style symbols + unicode/plain fallback
-    MarkdownText.tsx   # marked lexer → Ink renderers + cleanLatex + preprocessStreaming
-    code-highlight.ts  # highlight.js → CodeSegment[] with scope→color map + line splitter
+  ui/                  # Kit-UI components
+    theme.ts           # colour palette (no symbol fallback since Phase 12)
+    XakuHeader.tsx     # model · ctx bar · tokens · ✓/✖ · ^T hint · ⌂ workspace (click to copy) · git
+    XakuMenu.tsx       # startup model picker, shows baseUrl + workspace
+    XakuWelcome.tsx    # empty-state banner, shows model/temp/connection/workspace
+    XakuLogo.tsx       # ASCII wordmark
+    CommandPalette.tsx # aligned slash dropdown with windowStart() scroll windowing
+    ToolPanel.tsx      # tool activity list: status, args, format check, duration, diff, compact mode
     diff.ts            # computeDiffLines/formatDiffSummary over `diff` pkg (40-line cap, exact counts)
-    useScrollback.ts   # row-based scroll position: clamp + tail auto-follow math on measured heights
-    mouse.ts           # SGR mouse parsing (wheel + clicks) via Ink's chunk emitter, enable/disable, prompt sanitizer
-    useSpinner.ts      # shared 80ms spinner-frame ticker (active-gated interval)
-    replay-controls.ts # pure replay speed cycle/interval math + header indicator formatting
-    TopBar.tsx  ChatPanel.tsx  InputLine.tsx  StatsBar.tsx
-    CommandMenu.tsx  ToolPanel.tsx  ToolActivity.ts
-    BenchmarkPanel.tsx  SessionPicker.tsx
-    ComparePanel.tsx   # Split-view two-model comparison with rating mode
-tests/                 # Vitest suite, mirrors src/ layout (moved out of src/ 2026-11-04)
+    clipboard.ts       # OSC 52 + pbcopy/clip/wl-copy/xclip/xsel fallback
+    hooks.ts           # useTypewriter, useBlink
+    git.ts             # branch lookup
+tests/                 # Vitest suite, mirrors src/ layout
   logger.test.ts       # 2 tests (spec §14 Check 4)
   commands/
-    commands.test.ts   # 25 tests
-    report.test.ts     # 3 tests (spec §14 Check 5)
+    commands.test.ts   # 27 tests incl. dispatch-completeness guard (registry ⇔ parser ⇔ dispatcher)
+    report.test.ts     # 12 tests (spec §14 Check 5: /export numbers == /stats)
   model/
     session.test.ts    # 6 tests
-    benchmark.test.ts  # 4 tests (mocked client)
-    compare.test.ts    # 9 tests (scoring, autoSpeedScore, dimensions)
-    replay.test.ts     # 11 tests
   tools/
+    activity.test.ts   # 16 tests (auto-approve, counts, compact split, durations)
     executor.test.ts   # 23 tests
     path.test.ts       # 10 tests (cross-platform path handling)
     utils.test.ts      # 6 tests
+    workspace.test.ts  # 19 tests (/cd resolution, realpath, ~ expansion, relative display)
   ui/
-    theme.test.ts      # 5 tests (spec §14 Check 7)
-    markdown.test.ts   # 55 tests
-    toolpanel.test.ts  # 18 tests (compact mode, diff render, batch approval UI, animated spinner)
-    chatpanel.test.ts  # 13 tests (bottom-anchored rows, banner, collapsed/expanded reasoning, user box, header-row mapping)
-    diff.test.ts       # 12 tests
-    useScrollback.test.ts # 6 tests (clamp + follow-scroll math)
-    benchmark.test.ts  # 5 tests (BenchmarkPanel + SessionPicker render)
-    compare.test.ts    # 7 tests (ComparePanel split view, rating mode, score table, streaming)
-    replay-controls.test.ts # 7 tests (speed cycle, interval math, header format)
-    mouse.test.ts      # 22 tests (SGR wheel/click parsing, chunk buffering, sanitizing)
+    clipboard.test.ts  # 7 tests
+    command-palette.test.ts # 6 tests (windowStart keeps every command reachable)
+    diff.test.ts       # 11 tests
+    toolpanel.test.ts  # 5 tests (shortDisplay path rendering)
 scripts/
-  smoke.ts             # manual: chat round-trip
-  tool-test.ts         # manual: model→validate→execute→feedback
-  md-demo.tsx          # manual: render sample markdown/LaTeX through <MarkdownText/>
-  ui-demo.tsx          # manual: render diff preview + compact/collapsed ToolPanel states
-  acceptance.ts        # spec §14 acceptance test harness (5 automated, 2 manual)
-MANUAL_TESTS.md        # step-by-step procedures for manual acceptance checks
-```
+  pty-smoke.py         # drives the real TUI through a PTY; asserts on log events + written files
 
 ## 8. Change Log (append new entries at top)
+
+- **2026-11-19** — **Phase 13: Command repair + workspace visibility** (see `PHASE_13_COMMAND_REPAIR.md`). (1) **Repaired 8 dead slash commands.** The Phase 12 migration deleted the benchmark/compare/replay/report engines but left them registered and parsed; `handleSubmit`'s `switch` covered only 8 of 19 action types, so `/export`, `/save`, `/load`, `/autoapprove`, `/compact`, `/benchmark`, `/compare`, `/replay` all fell through to `Unknown command: ${action.type}` — while all 77 unit tests stayed green because they only exercised `parseCommand`, never the dispatcher. `/benchmark`+`/compare`/`/replay` were deregistered (no engine to restore); the other five were wired up, including rebuilding `src/commands/report.ts` and importing `src/commands/cases.ts`, which had been sitting unused on disk. (2) **Made the dispatcher total.** `switch` → `commandHandlers: Record<CommandAction['type'], handler>`, so a new action without a handler is a compile error; added `HANDLED_ACTION_TYPES` with a conditional-type assertion, plus bidirectional tests (registered ⇒ handled, handled ⇒ reachable). Writing them immediately found two more drift bugs: a `noop` action nothing produced (deleted) and `/cancel` handled but never registered, so it was invisible in the palette. Also gave `{type:'error'}` a handler — usage errors like `/temperature` with no argument printed "Unknown command: error". (3) **Restored the tool-activity subsystem** lost with `ToolPanel.tsx`: new pure `src/tools/activity.ts` (statuses, counts, durations, compact split, `shouldAutoApprove` driven by the registry's `isReadOnly` flag rather than a duplicated name list) and new `src/ui/ToolPanel.tsx` (status icon, workspace-relative args, `format check` line, duration, auto-approved marker, collapsed outcome rows). Restored `[f] fix / [s] skip / [r] retry` (spec §9 forbids auto-retry); malformed calls now pause the turn instead of leaking a dangling `tool_calls` into the next request; `ToolContext.abortSignal` is finally populated so Ctrl+C interrupts a running shell/db tool (it was declared and honoured by the tools but never passed); approved tools run concurrently with results in `tool_calls` order; `write_file` diff previews rebuilt via new `src/ui/diff.ts` over the `diff` package, which had stayed in `package.json` unused. `/stats` rebuilt and now shares one `computeStats()` with `/export`, making spec §14 Check 5 true by construction. (4) **Two more bugs found only by driving the real TUI** via new `scripts/pty-smoke.py` (PTY harness asserting on artifacts, not pixels): the input **never cleared** after Phase 12 dropped the kit's `REPL` (which used to `setInputValue("")` before `onSubmit`), so each new message appended to the last; and `CommandPalette` rendered `suggestions.slice(0,6)` regardless of `selectedIndex`, so with 14 commands the cursor moved onto never-painted rows 6–13 and selected invisible commands — fixed with pure `windowStart()` scroll windowing + `↑n above`/`↓n more` indicators counted into `viewportHeight`. (5) **Workspace visibility (new feature):** pure `src/tools/workspace.ts`; `⌂ ~/path` segment in `XakuHeader` (left-truncated to keep the leaf); `/cd <path>` changes the workspace mid-session (relative to current, `~` expanded, `realpath`ed so it matches the sandbox comparison, refused while a turn or approval is live, logged as `set_workspace`/`workspace_error`); `/pwd` shows current + launch directory; tool previews show workspace-relative paths and keep absolute form for escapes; startup/menu/welcome lines name the workspace; clicking the header copies it via new `src/ui/clipboard.ts` (OSC 52 + native fallbacks), which required moving alt-screen ownership from raw escapes in `cli.tsx` to the kit's `<AlternateScreen>` because the renderer only enables SGR mouse tracking when it learns of the alt screen from that component. Workspace became its own `useState` rather than a `config` mutation, since `logger` was `useMemo`'d on `[config]` and changing it would have opened a second session log mid-session. Corrected `XakuMenu`'s `esc quit` label (it only dismisses). (6) **Docs/harness honesty:** `scripts/acceptance.ts` pointed at deleted test files (`src/commands/report.test.ts`, `src/ui/theme.test.ts`); paths fixed, Check 7 (symbol fallback) now reports **skip** instead of pretending to pass since `XAKU_PLAIN=1` died with the bespoke UI, added Check 8 (dispatch completeness) and Check 9 (real-TUI sweep), and the summary now counts skips instead of dropping them. `WALKTHROUGH.md` §5 and the §7 file map were rewritten — they still advertised deleted features (markdown rendering, row scrollback/mouse, batch approval, benchmark, compare, replay) as working. Tests: 77 → **150** across 13 files.
 
 - **2026-11-18** — **Phase 12: Kit UI migration + animation/palette/thinking refinements** (see `PHASE_12_KIT_UI.md`). (1) **Dropped the bespoke Ink UI**: deleted `src/ui/{TopBar,Banner,MenuScreen,InputLine,ToolPanel,StatusLine,gradient,mouse,useSpinner,useScrollback,replay-controls,MarkdownText,code-highlight,diff,ChatPanel,CommandMenu,ToolActivity,BenchmarkPanel,SessionPicker,ComparePanel}.ts(x)` plus stale engine modules (`benchmark.ts`, `compare.ts`, `replay.ts`, `report.ts`) and 15 obsolete test files. Replaced `ink` with `@claude-code-kit/ink-renderer` + `@claude-code-kit/ui`; bumped React to `^19.2.0` and `engines >=22`. Kept our own: `XakuLogo.tsx`, `XakuMenu.tsx`, `XakuWelcome.tsx`, `XakuHeader.tsx`, `theme.ts`, `git.ts`. (2) **Model label fix**: kit's `MessageList` hardcodes "Claude" in `ROLE_CONFIG` and in `renderStream`. Solution: custom `renderMessage` callback in `src/app.tsx` renders `● qwen3:8b` (purple), `❯ You` (cyan), and dim system lines. Streaming uses a synthetic `id: '__streaming'` assistant message whose content is the animated partial — flows through `renderMessage` and gets the correct model name. (3) **Replaced `REPL`** with kit primitives (`MessageList`, `PromptInput`, `StatusLine`, `Divider`, `PermissionRequest`, `Spinner`) composed directly in `app.tsx`; lifted `inputValue`/`history`/submit-handler into App. Why: kit's `REPL` renders command suggestions inline inside `PromptInput`, breaking layout. (4) **Custom `CommandPalette`** (`src/ui/CommandPalette.tsx`): triggered when input starts with `/` and has no space; rounded purple-bordered panel with fixed-width name column and truncated descriptions; max 6 visible. Key capture trick: `CommandPalette` is rendered as a JSX sibling **before** `PromptInput`, so its `useInput` listener registers first (React mounts siblings in order, effects fire in mount order); when the palette is open, ↑↓ Enter Tab Esc call `event.stopImmediatePropagation()`, preventing `PromptInput` from running its history nav. Selecting inserts `/cmd ` (trailing space); second Enter actually submits. Esc dismisses until the slash query changes. (5) **Animation**: new `src/ui/hooks.ts` exports `useTypewriter(target, charsPerTick=3, tickMs=20)` revealing streaming text letter-by-letter via a `displayRef` + interval (snaps on target shrink/reset), and `useBlink(periodMs=530, active)` toggling a boolean. Wired into `renderMessage`: synthetic streaming bubble renders `useTypewriter(generating ? partial : '')`; if empty during generation, a `<Spinner />` occupies the body; otherwise a purple `▌` cursor at the end of the last visible line toggles via `useBlink(530, generating)`. `XakuHeader` swaps `◉ → ◐` while `isGenerating`. (6) **Collapsible thinking via `Ctrl+T`**: `toKitMessages` now emits structured `MessageContent[]` (`{type:'thinking', text}` then `{type:'text', text}`) instead of prepending `> thinking: …` text. `renderMessage` shows thinking as `✻ Thinking… (Ctrl+T to expand)` collapsed by default; App-level `useInput` toggles a global `showThinking` flag on Ctrl+T. Header hint flips to `^T hide thinking` when expanded. Mouse-click toggle was considered and skipped — SGR mouse delivery is unreliable in Apple Terminal and the kit doesn't expose click plumbing for `renderMessage`. (7) **View-height compensation**: `viewportHeight = rows - 7 - paletteRows - (pendingTool ? 8 : 0)` so opening the palette doesn't shift the rest of the TUI. (8) **Cleanup**: 15 stale test files referencing deleted UI/engine modules removed; `MANUAL_TESTS.md` rewritten to reflect the kit UI; Checks 7–10 replaced (model label / command palette / response animation / thinking toggle). Final state: typecheck ✅, `npx tsc` ✅, `npx vitest run` 77/77 ✅.
 

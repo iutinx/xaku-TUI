@@ -165,7 +165,9 @@ This document describes manual testing procedures for acceptance checks that req
    ```
    /
    ```
-   Expected: a rounded purple-bordered panel appears between the message area and the input, listing all 14 commands. The total TUI height does not change (message viewport shrinks by exactly the palette height).
+   Expected: a rounded purple-bordered panel appears between the message area and the input,
+   showing the first 6 commands plus a `↓ 8 more` indicator (14 are registered). The total
+   TUI height does not change (message viewport shrinks by exactly the palette height).
 
 3. **Filter** by typing more characters, e.g. `/te`.
    Expected: only `/temperature` is shown, focused.
@@ -183,7 +185,7 @@ This document describes manual testing procedures for acceptance checks that req
    Type `/` again, press Esc. Expected: palette hides. Type another character (or change the slash query). Palette reappears.
 
 8. **Check long descriptions:**
-   Type `/c` to filter to `/clear`, `/compact`, `/compare`.
+   Type `/c` to filter to `/clear`, `/cancel`, `/cd`, `/compact`.
    Expected: command names are column-aligned; descriptions do not wrap or spill past the right border; if a description exceeds terminal width it ends in `…`.
 
 ### Pass Criteria
@@ -358,6 +360,130 @@ Requires a reasoning-capable model (e.g. `qwen3:4b` or `qwen3:8b`, which stream 
 
 ---
 
+## Check 11: Workspace Path Visibility
+
+**Objective:** Verify xaku shows where it was launched from, and that the workspace can be changed mid-session.
+
+### Test Steps
+
+1. **Start xaku from a specific folder:**
+   ```bash
+   cd ~/some/project && npm run dev
+   ```
+
+2. **Check the setup menu** (before picking a model):
+   - Expected: a line reading `⌂ workspace <path>` under the Ollama status line.
+
+3. **Pick a model and enter the chat.**
+   - Expected: the header shows `⌂ <path>` on the right, next to the git branch.
+   - Expected: a system line reads `Workspace: <path> · Model: <model>`.
+   - Note: a long path is truncated from the left (`…/project/src`), the leaf stays visible.
+
+4. **`/pwd`**
+   - Expected: two lines — the current workspace and the original launch directory.
+
+5. **`/cd src`** (relative)
+   - Expected: `Workspace: <path>/src`, and a new value in the header.
+   - Verify tools are now sandboxed there: ask the model to read a file that exists in the
+     old root but not in `src/` → should be `blocked` / not found.
+
+6. **`/cd ..`** then **`/cd /definitely/missing`**
+   - Expected: the bad path is refused with `Workspace unchanged: Not a directory: …`
+     and the previous workspace is preserved.
+
+7. **`/cd <path>` while a generation is running**
+   - Expected: refused — "Cannot change workspace while a generation or tool prompt is active."
+
+8. **Click the `⌂` workspace segment in the header.**
+   - Expected: flashes `copied ✓` and a system line confirms the clipboard write.
+   - Requires a terminal with OSC 52 permission enabled or a native helper (`pbcopy`,
+     `wl-copy`, `xclip`, `xsel`, `clip`). Without one it says the clipboard is unavailable
+     rather than lying.
+
+### Pass Criteria
+- [ ] Workspace path visible at startup without scrolling, in menu + header + a system line
+- [ ] `/pwd` shows current and launch directories
+- [ ] `/cd` moves the sandbox and tool boundary follows it
+- [ ] Invalid `/cd` is refused without changing state
+- [ ] `/cd` blocked during an active turn
+- [ ] Long paths truncate from the left, keeping the leaf readable
+
+---
+
+## Check 12: Tool Failure Choices (fix / skip / retry)
+
+**Objective:** Verify spec §9 — every tool failure offers a choice, and nothing auto-retries.
+
+### Test Steps
+
+1. **Start xaku**, ensure `/autoapprove none`.
+
+2. **Ask for a file that does not exist:**
+   ```
+   Use read_file to read definitely-missing.txt
+   ```
+
+3. **Approve the call with `a`.**
+   - Expected: tool row shows `✖ failed`, and a prompt appears:
+     `✖ read_file failed — [f] fix  [s] skip  [r] retry`
+   - Expected: nothing happens on its own. The model must **not** receive the error until you choose.
+
+4. **Press `r` (retry)**
+   - Expected: the same call runs again, fails again, and the prompt returns.
+
+5. **Press `f` (fix)**
+   - Expected: the error is sent back to the model, which then tries a different approach.
+
+6. **Press `s` (skip)**
+   - Expected: the model receives "skipped by user" and continues.
+
+7. **Malformed call check:** with a model that mis-formats arguments, verify the row shows
+   `format check: ✖ <reason>` and the **turn pauses** for a choice rather than continuing
+   with a dangling tool call.
+
+8. **Cancel a long-running tool:** ask for `run_shell` with `sleep 30`, approve, then press `Ctrl+C`.
+   - Expected: the process is killed promptly and the row shows `cancelled`.
+
+### Pass Criteria
+- [ ] Failures pause and offer `[f] [s] [r]`; no automatic retry or error feed-back
+- [ ] `retry` re-executes the identical call
+- [ ] `fix` feeds the error to the model
+- [ ] `skip` continues the turn
+- [ ] Malformed calls label `format check: ✖` and pause the turn
+- [ ] `Ctrl+C` actually terminates a running shell tool
+
+---
+
+## Check 13: Command Palette Reachability
+
+**Objective:** Verify every registered command can be reached, not just the first six.
+
+### Test Steps
+
+1. **Type `/`** to open the palette.
+   - Expected: at most 6 rows plus a `↓ N more` indicator (14 commands are registered).
+
+2. **Press `↓` repeatedly past 6 rows.**
+   - Expected: the window scrolls so the focused row is **always visible**; you never have a
+     cursor on a blank area.
+
+3. **Arrow down to the last command and press Enter.**
+   - Expected: the inserted `/… ` matches the visible highlighted row.
+
+4. **Type `/c`** — expect `clear`, `cancel`, `cd`, `compact` only.
+   **Type `/p`** — expect `pwd` only.
+
+5. **Type `/benchmark`, `/compare` or `/replay` and Enter.**
+   - Expected: `Unknown command /benchmark` — these are intentionally **deregistered** until
+     their engines are rebuilt, and must not appear in the palette at all.
+
+### Pass Criteria
+- [ ] Scrolling window keeps focus visible for all 14 commands
+- [ ] Filtered results are reachable, including rows past the 6th
+- [ ] `/cd` and `/pwd` appear; `/benchmark`, `/compare`, `/replay` do not
+
+---
+
 ## Troubleshooting
 
 ### Ollama Connection Issues
@@ -424,17 +550,36 @@ Note: there is currently no ASCII-fallback mode — the kit UI assumes a Unicode
 
 Before marking v1 as complete, verify:
 
-- [ ] All automated acceptance tests pass (`scripts/acceptance.ts`)
+- [x] All automated acceptance tests pass (`scripts/acceptance.ts` — 5 pass, 3 manual, 1 skipped)
 - [ ] Check 1: Tool call approval flow works (manual)
 - [ ] Check 6: Ollama disconnect handled gracefully (manual)
 - [ ] Check 7: Model label renders as the active model (manual)
 - [ ] Check 8: Command palette alignment + two-enter flow (manual)
 - [ ] Check 9: Response animation — typewriter + spinner + blinking cursor (manual)
 - [ ] Check 10: Thinking block visibility via `Ctrl+T` (manual, reasoning model)
-- [ ] Cross-platform path handling verified
-- [ ] Long-running tools can be cancelled
-- [ ] Session logs capture all events
+- [ ] Check 11: Workspace path visibility, `/cd`, `/pwd`, click-to-copy (manual)
+- [ ] Check 12: Tool failure choices — fix / skip / retry (manual)
+- [ ] Check 13: Command palette reachability for all 14 commands (manual)
+- [x] Cross-platform path handling verified (`tests/tools/path.test.ts`, `tests/tools/workspace.test.ts`)
+- [ ] Long-running tools can be cancelled (Check 12 step 8)
+- [x] Session logs capture all events
 - [ ] No crashes or data loss in any test scenario
+
+**Not currently achievable:** spec §14 Check 7 — "usable on a terminal without symbol
+support using the fallback markers". The `XAKU_PLAIN=1` ASCII fallback was removed with
+the bespoke UI in Phase 12 and has not been rebuilt; `scripts/acceptance.ts` reports this
+as **skip** rather than passing it.
+
+### Automated sweep
+
+`scripts/pty-smoke.py` drives the real TUI through a PTY and asserts on artifacts
+(session-log events, files written by `/export` and `/save`) rather than scraped pixels.
+It covers Checks 11 and 13 plus the command-dispatch repairs. Cold start is 40–75 s, so
+it polls for readiness instead of sleeping a fixed amount.
+
+```bash
+python3 scripts/pty-smoke.py
+```
 
 ---
 
@@ -450,5 +595,5 @@ If any manual test fails:
 
 ---
 
-**Last Updated:** 2026-11-18 — rewrote Checks 7–9 and added Check 10 to match the `@claude-code-kit/ui` migration (see [`PHASE_12_KIT_UI.md`](./PHASE_12_KIT_UI.md))
-**Test Coverage:** 10/10 checks (5 automated, 5 manual)
+**Last Updated:** 2026-11-19 — added Checks 11–13 for workspace visibility, tool-failure choices and palette reachability after the Phase 13 command repair (see [`PHASE_13_COMMAND_REPAIR.md`](./PHASE_13_COMMAND_REPAIR.md)); corrected Check 8's command count and noted the deregistered commands.
+**Test Coverage:** 13 checks (5 automated + 1 PTY sweep, 7 manual). Spec §14 Check 7 (symbol fallback) is **not implemented** since Phase 12.

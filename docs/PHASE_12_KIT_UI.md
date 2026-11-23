@@ -1,7 +1,15 @@
 # Phase 12: Claude Code Kit UI Migration — Summary
 
+> **⚠️ Status was overstated.** This phase was recorded as "✅ Complete" with "77/77
+> passing", and both were literally true, but the migration left **8 of 14 registered slash
+> commands** with no handler (they printed "Unknown command"), the tool-activity panel and
+> the `[f]/[s]/[r]` failure choices deleted, `abortSignal` never passed to tools, and the
+> command palette unable to reach rows past the 6th. It also broke input clearing. All of it
+> was invisible to the test suite because nothing exercised the dispatcher. See
+> [`PHASE_13_COMMAND_REPAIR.md`](./PHASE_13_COMMAND_REPAIR.md) for the repair.
+
 **Date**: 2026-11-18
-**Status**: ✅ Complete
+**Status**: ✅ Complete *(as of this write-up; see the note above)*
 **Tests**: 77/77 passing
 **Supersedes**: `docs/PHASE_11_UI_REBRAND.md` (the bespoke Ink UI it describes was deleted)
 
@@ -49,9 +57,15 @@ Input value, history, and submit handler are now owned by `App`, so we have a cl
 ### 4. Custom command palette (`src/ui/CommandPalette.tsx`)
 
 - Triggered when input starts with `/` and has no space and is not dismissed.
-- Filters via `getFilteredCommands()` from `src/commands/index.ts` (14 commands: model, temperature, system, clear, retry, autoapprove, compact, benchmark, compare, replay, stats, export, save, load).
+- Filters via `getFilteredCommands()` from `src/commands/index.ts`. At the time this listed
+  14 commands, but **five of them had no handler** — see
+  [`PHASE_13_COMMAND_REPAIR.md`](./PHASE_13_COMMAND_REPAIR.md). The registry is now 14
+  commands with `/cd` and `/pwd` added and `/benchmark`, `/compare`, `/replay` removed.
 - Layout: rounded purple border, fixed-width `name` column (padded), description column truncated to fit terminal width with `…`, hints in purple.
-- Max 6 visible; arrow keys wrap.
+- Max 6 visible; arrow keys wrap. **Correction (Phase 13):** "max 6 visible" was actually a
+  bug — the window was pinned to `suggestions.slice(0, 6)` regardless of the cursor, so with
+  more than 6 commands the arrows moved focus onto rows that were never painted and selected
+  invisible commands. `windowStart()` now scrolls the window to keep focus visible.
 - **Key capture trick:** `CommandPalette` is rendered as a JSX sibling **before** `PromptInput`. React's effect mount order is siblings-first, so `CommandPalette`'s `useInput` listener is registered before `PromptInput`'s. When the palette is open, our handler calls `event.stopImmediatePropagation()` on ↑ ↓ Enter Tab Esc, cleanly preventing `PromptInput` from running its history navigation on the same keystroke. When the palette is closed, our handler is a no-op (the listener is always attached because `useInput` doesn't unsubscribe on `isActive === false`).
 - Selecting inserts `/cmd ` (trailing space) into the input. Second Enter actually submits. Matches user expectation: "select from dropdown, then press Enter again to execute."
 - Esc dismisses until the slash query changes.

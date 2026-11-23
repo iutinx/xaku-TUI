@@ -78,6 +78,9 @@ Windows terminals may not support all Unicode glyphs. As of Phase 12 (2026-11-18
 - `●` `❯` `◉` `◐` `✻` `▌` (model/user/system markers, generating indicator, thinking, blink cursor)
 - `⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏` (braille spinner during generation)
 - `█` `░` (context bar in `XakuHeader`)
+- `⌂` (workspace path segment, added in Phase 13) and `…` (path/description truncation)
+- `✓` `✖` `↓` `├` `└` (tool activity statuses in `ToolPanel`)
+- `+` `-` `|` (write_file diff gutters)
 - Box-drawing borders on the `CommandPalette` (rounded corners)
 
 **Recommendation**: use Windows Terminal (or any ConPTY-backed terminal with a Nerd/Powerline-capable font). Old `cmd.exe` and very minimal terminals may render these glyphs as boxes or `?`.
@@ -139,7 +142,7 @@ All unit tests should pass on Windows:
 npm test
 ```
 
-Expected: 77 tests passing (6 files — engine, commands, tools, model/session, logger).
+Expected: 150 tests passing (13 files — commands, logger, model/session, tools, ui).
 
 ### Manual Tests
 
@@ -201,13 +204,52 @@ Expected: 77 tests passing (6 files — engine, commands, tools, model/session, 
 1. Start xaku: `npm run dev`
 
 2. Type `/` in the input.
-   Expected: a rounded purple-bordered panel appears above the input listing all slash commands (`/model`, `/temperature`, `/system`, `/clear`, `/retry`, `/autoapprove`, `/compact`, `/benchmark`, `/compare`, `/replay`, `/stats`, `/export`, `/save`, `/load`). The TUI total height does not change.
+   Expected: a rounded purple-bordered panel appears above the input. Only the first 6
+   commands are painted at once, with a `↓ N more` indicator — 14 are registered
+   (`/model`, `/temperature`, `/system`, `/clear`, `/retry`, `/cancel`, `/autoapprove`,
+   `/compact`, `/cd`, `/pwd`, `/stats`, `/export`, `/save`, `/load`).
+   The TUI total height does not change.
+   Note: `/benchmark`, `/compare` and `/replay` must **not** appear — their engines were
+   removed in Phase 12 and they are intentionally deregistered until rebuilt.
 
 3. Use ↑/↓ to navigate, press Enter on `/model`.
    Expected: input now reads `/model ` (with trailing space); palette closes; command has **not** executed yet.
 
 4. Press Enter again.
    Expected: `/model` executes — model list appears in the message area.
+
+5. Press ↓ past the 6th row.
+   Expected: the list scrolls so the highlighted row is always visible (Phase 13 fix —
+   rows 7+ used to be unreachable-but-selectable).
+
+#### Test 6: Workspace Path + `/cd`
+
+1. Start xaku from a folder, e.g. `cd C:\Users\you\project; npm run dev`.
+   Expected: `⌂ workspace <path>` shown in the model menu, a `Workspace: … · Model: …`
+   line at startup, and `⌂ <path>` in the header (truncated from the left if long).
+
+2. Run `/pwd`.
+   Expected: current workspace plus the original launch directory.
+
+3. Run `/cd src` then `/cd ..`.
+   Expected: both accepted; the header path updates; tools are sandboxed to the new path.
+
+4. Run `/cd C:\Windows\nope-missing`.
+   Expected: `Workspace unchanged: Not a directory: …` and the previous path is kept.
+
+5. Verify backslash handling: `/cd src\deep` (Windows-style separator) should resolve.
+   See the cross-platform path tests in `tests/tools/path.test.ts` and
+   `tests/tools/workspace.test.ts`.
+
+#### Test 7: Click-to-copy the workspace path
+
+1. In **Windows Terminal**, click the `⌂ <path>` segment in the header.
+   Expected: it flashes `copied ✓`; paste (`Ctrl+V`) to confirm the path.
+
+   Windows uses `clip.exe` as the native fallback, and OSC 52 works in Windows Terminal
+   if "Enable copy on select"/OSC support is on. Older `cmd.exe`/ConHost supports neither
+   — there the message says the clipboard is unavailable rather than failing silently, and
+   `/pwd` is the fallback.
 
 ## Troubleshooting
 
