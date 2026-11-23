@@ -14,6 +14,19 @@ export interface CommandPaletteProps {
 
 const MAX_VISIBLE = 6;
 
+/**
+ * First index of the visible window, chosen so `selectedIndex` stays on screen.
+ * Without this the list always rendered suggestions[0..5], so once more than
+ * MAX_VISIBLE commands were registered the cursor could move onto rows that were
+ * never painted and select a command the user could not see.
+ */
+export function windowStart(total: number, selectedIndex: number, visible = MAX_VISIBLE): number {
+  if (total <= visible) return 0;
+  if (selectedIndex < visible - 1) return 0;
+  if (selectedIndex >= total - 1) return total - visible;
+  return selectedIndex - (visible - 2);
+}
+
 export function CommandPalette({
   isOpen,
   suggestions,
@@ -49,8 +62,8 @@ export function CommandPalette({
 
   if (!isOpen || suggestions.length === 0) return null;
 
-  const visibleCount = Math.min(MAX_VISIBLE, suggestions.length);
-  const visible = suggestions.slice(0, visibleCount);
+  const start = windowStart(suggestions.length, selectedIndex);
+  const visible = suggestions.slice(start, start + MAX_VISIBLE);
   const nameColWidth = Math.min(
     Math.max(...visible.map((s) => s.name.length)) + 1,
     18,
@@ -66,8 +79,12 @@ export function CommandPalette({
       paddingX={1}
       marginX={1}
     >
+      {start > 0 && (
+        <Text dimColor> ↑ {start} above</Text>
+      )}
       {visible.map((cmd, i) => {
-        const focused = i === selectedIndex;
+        const absolute = start + i;
+        const focused = absolute === selectedIndex;
         const name = `/${cmd.name}`;
         const nameCell = name.padEnd(nameColWidth);
         const hint = cmd.hint ? ` ${cmd.hint}` : '';
@@ -94,6 +111,9 @@ export function CommandPalette({
           </Box>
         );
       })}
+      {start + visible.length < suggestions.length && (
+        <Text dimColor> ↓ {suggestions.length - start - visible.length} more</Text>
+      )}
     </Box>
   );
 }
