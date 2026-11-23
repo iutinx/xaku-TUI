@@ -33,6 +33,10 @@ export const COMMANDS: CommandDef[] = [
     description: 'Re-send the last prompt with current settings',
   },
   {
+    name: 'cancel',
+    description: 'Abort the in-flight generation and any running tool',
+  },
+  {
     name: 'autoapprove',
     description: 'Auto-approve trusted tools without prompting',
     hint: '<none|read-only|all>',
@@ -43,19 +47,13 @@ export const COMMANDS: CommandDef[] = [
     description: 'Collapse or expand completed tool activities',
   },
   {
-    name: 'benchmark',
-    description: 'Run a saved test case across models and compare speed/tools',
-    hint: '<case> [model,model,…]',
+    name: 'cd',
+    description: 'Change the workspace folder tools operate in',
+    hint: '<path>',
   },
   {
-    name: 'compare',
-    description: 'Compare two models side-by-side on the same test case',
-    hint: '<case> modelA,modelB',
-  },
-  {
-    name: 'replay',
-    description: 'Step through a past session from its log',
-    hint: '[index]',
+    name: 'pwd',
+    description: 'Show the current workspace path',
   },
   {
     name: 'stats',
@@ -86,7 +84,6 @@ export function getFilteredCommands(query: string): CommandDef[] {
 }
 
 export type CommandAction =
-  | { type: 'noop'; message?: string }
   | { type: 'clear' }
   | { type: 'set-system'; prompt: string | null }
   | { type: 'set-model'; model: string }
@@ -96,15 +93,50 @@ export type CommandAction =
   | { type: 'set-autoapprove'; mode: AutoApproveMode }
   | { type: 'show-autoapprove' }
   | { type: 'toggle-compact' }
-  | { type: 'benchmark'; name: string; models?: string[] }
-  | { type: 'compare'; name: string; models: [string, string] }
-  | { type: 'replay'; index?: number }
+  | { type: 'set-workspace'; path: string }
+  | { type: 'show-workspace' }
   | { type: 'stats' }
   | { type: 'export' }
   | { type: 'save'; name: string }
   | { type: 'load'; name: string }
   | { type: 'cancel' }
   | { type: 'error'; message: string };
+
+export type CommandActionType = CommandAction['type'];
+
+/**
+ * The action types `src/app.tsx` dispatches. Declared here so the registry, the
+ * parser and the dispatcher can be checked against each other: app.tsx builds a
+ * `Record<CommandActionType, …>` handler map, so a new action without a handler
+ * is a compile error, and the tests assert every registered command lands on a
+ * type in this list.
+ */
+export const HANDLED_ACTION_TYPES = [
+  'clear',
+  'set-system',
+  'set-model',
+  'set-temperature',
+  'retry',
+  'list-models',
+  'set-autoapprove',
+  'show-autoapprove',
+  'toggle-compact',
+  'set-workspace',
+  'show-workspace',
+  'stats',
+  'export',
+  'save',
+  'load',
+  'cancel',
+  'error',
+] as const satisfies readonly CommandActionType[];
+
+/** Every CommandAction type must be listed above. */
+type _AllActionsHandled = Exclude<CommandActionType, (typeof HANDLED_ACTION_TYPES)[number]> extends never
+  ? true
+  : { ERROR: 'add the missing action type to HANDLED_ACTION_TYPES and a handler in app.tsx' };
+const _assertActionsHandled: _AllActionsHandled = true;
+void _assertActionsHandled;
 
 export function parseCommand(input: string): CommandAction {
   const trimmed = input.trim();
@@ -132,32 +164,11 @@ export function parseCommand(input: string): CommandAction {
       return { type: 'retry' };
     case 'compact':
       return { type: 'toggle-compact' };
-    case 'benchmark': {
-      if (!args) return { type: 'error', message: 'Usage: /benchmark <case-name> [model,model,…]' };
-      const [name, modelList] = args.split(/\s+/);
-      const models = modelList
-        ? modelList.split(',').map((m) => m.trim()).filter(Boolean)
-        : undefined;
-      return { type: 'benchmark', name, models };
-    }
-    case 'compare': {
-      if (!args) return { type: 'error', message: 'Usage: /compare <case-name> modelA,modelB' };
-      const parts = args.split(/\s+/);
-      if (parts.length < 2) return { type: 'error', message: 'Usage: /compare <case-name> modelA,modelB' };
-      const name = parts[0];
-      const modelList = parts.slice(1).join(' ');
-      const models = modelList.split(',').map((m) => m.trim()).filter(Boolean);
-      if (models.length !== 2) return { type: 'error', message: '/compare requires exactly 2 models separated by a comma' };
-      return { type: 'compare', name, models: [models[0], models[1]] };
-    }
-    case 'replay': {
-      if (!args) return { type: 'replay' };
-      const index = Number(args);
-      if (!Number.isInteger(index) || index < 1) {
-        return { type: 'error', message: 'Usage: /replay [1-based session index]' };
-      }
-      return { type: 'replay', index };
-    }
+    case 'cd':
+      if (!args) return { type: 'error', message: 'Usage: /cd <path>' };
+      return { type: 'set-workspace', path: args };
+    case 'pwd':
+      return { type: 'show-workspace' };
     case 'autoapprove':
     case 'auto': {
       if (!args) return { type: 'show-autoapprove' };

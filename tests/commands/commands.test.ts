@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { COMMANDS, getFilteredCommands, parseCommand } from '../../src/commands/index.js';
+import {
+  COMMANDS,
+  HANDLED_ACTION_TYPES,
+  getFilteredCommands,
+  parseCommand,
+} from '../../src/commands/index.js';
 
 describe('getFilteredCommands', () => {
   it('returns all commands for an empty query', () => {
@@ -80,62 +85,27 @@ describe('parseCommand', () => {
     expect(getFilteredCommands('comp')[0].name).toBe('compact');
   });
 
-  it('parses /benchmark with explicit model list', () => {
-    expect(parseCommand('/benchmark webtest qwen3:4b,qwen3:8b')).toEqual({
-      type: 'benchmark',
-      name: 'webtest',
-      models: ['qwen3:4b', 'qwen3:8b'],
-    });
-  });
-
-  it('parses /benchmark without models as all-installed', () => {
-    expect(parseCommand('/benchmark webtest')).toEqual({ type: 'benchmark', name: 'webtest', models: undefined });
-  });
-
-  it('rejects /benchmark without a case name', () => {
-    expect(parseCommand('/benchmark').type).toBe('error');
-  });
-
-  it('parses /compare with two models', () => {
-    expect(parseCommand('/compare webtest qwen3:4b,qwen3:8b')).toEqual({
-      type: 'compare',
-      name: 'webtest',
-      models: ['qwen3:4b', 'qwen3:8b'],
-    });
-  });
-
-  it('rejects /compare with only one model', () => {
-    const action = parseCommand('/compare webtest qwen3:4b');
-    expect(action.type).toBe('error');
-    if (action.type === 'error') {
-      expect(action.message).toContain('2 models');
+  it('treats the deregistered benchmark/compare/replay as unknown', () => {
+    // Their engines and panels were deleted in Phase 12. They must not be
+    // advertised in the palette while unhandled.
+    for (const cmd of ['/benchmark x a,b', '/compare x a,b', '/replay 2']) {
+      const action = parseCommand(cmd);
+      expect(action.type).toBe('error');
+      if (action.type === 'error') expect(action.message).toContain('Unknown command');
     }
   });
 
-  it('rejects /compare with three models', () => {
-    const action = parseCommand('/compare webtest a,b,c');
-    expect(action.type).toBe('error');
-    if (action.type === 'error') {
-      expect(action.message).toContain('2 models');
-    }
+  it('parses /cd with a path', () => {
+    expect(parseCommand('/cd ./src')).toEqual({ type: 'set-workspace', path: './src' });
+    expect(parseCommand('/cd ~/projects')).toEqual({ type: 'set-workspace', path: '~/projects' });
   });
 
-  it('rejects /compare without a case name', () => {
-    expect(parseCommand('/compare').type).toBe('error');
+  it('rejects /cd without a path', () => {
+    expect(parseCommand('/cd').type).toBe('error');
   });
 
-  it('parses /compare with spaces in model list', () => {
-    expect(parseCommand('/compare mytest modelA , modelB')).toEqual({
-      type: 'compare',
-      name: 'mytest',
-      models: ['modelA', 'modelB'],
-    });
-  });
-
-  it('parses /replay with and without an index', () => {
-    expect(parseCommand('/replay')).toEqual({ type: 'replay' });
-    expect(parseCommand('/replay 3')).toEqual({ type: 'replay', index: 3 });
-    expect(parseCommand('/replay x').type).toBe('error');
+  it('parses /pwd', () => {
+    expect(parseCommand('/pwd')).toEqual({ type: 'show-workspace' });
   });
 
   it('parses /autoapprove with each valid mode', () => {
@@ -163,5 +133,70 @@ describe('parseCommand', () => {
   it('filters /autoapprove by prefix and alias', () => {
     expect(getFilteredCommands('auto')).toHaveLength(1);
     expect(getFilteredCommands('autoapprove')[0].name).toBe('autoapprove');
+  });
+});
+
+/**
+ * Regression guard. Phase 12 deleted the benchmark/compare/replay/report engines
+ * but left them registered, so seven commands parsed into actions with no
+ * handler and printed "Unknown command: export". Parser-level tests stayed green
+ * the whole time. These two tests fail if the registry and the dispatcher ever
+ * drift apart again.
+ */
+describe('command dispatch completeness', () => {
+  /**
+   * Arguments that make each required-argument command parse successfully.
+   * A command with a `<required>` hint missing from here fails the test.
+   */
+  const SAMPLE_ARGS: Record<string, string> = {
+    temperature: '0.5',
+    autoapprove: 'none',
+    cd: '.',
+    save: 'my-case',
+    load: 'my-case',
+    model: 'qwen3:4b',
+    system: 'be terse',
+  };
+
+  /** Both the bare and the argument form of every command. */
+  function commandForms(cmd: (typeof COMMANDS)[number]): string[] {
+    const forms = [`/${cmd.name}`];
+    if (cmd.hint?.startsWith('<')) {
+      const arg = SAMPLE_ARGS[cmd.name];
+      expect(arg, `/${cmd.name} takes a required argument but tests have no sample for it`).toBeTruthy();
+      forms.push(`/${cmd.name} ${arg}`);
+    } else if (cmd.hint) {
+      forms.push(`/${cmd.name} x`);
+    }
+    return forms;
+  }
+
+  it('every registered command parses to an action the app handles', () => {
+    for (const cmd of COMMANDS) {
+      for (const form of commandForms(cmd)) {
+        const action = parseCommand(form);
+        if (action.type === 'error') {
+          // Optional-argument forms are allowed to ask for usage, but a
+          // registered command must never fall through to the typo suggestion.
+          expect(action.message, `${form} is registered but unparsed`).not.toContain('Unknown command');
+          continue;
+        }
+        expect(
+          HANDLED_ACTION_TYPES,
+          `${form} yields action "${action.type}" which src/app.tsx does not handle`,
+        ).toContain(action.type);
+      }
+    }
+  });
+
+  it('every handled action type is reachable from the registry', () => {
+    const produced = new Set(
+      COMMANDS.flatMap((cmd) => commandForms(cmd).map((form) => parseCommand(form).type)),
+    );
+    for (const handled of HANDLED_ACTION_TYPES) {
+      // 'error' is produced by the default branch, not by a registered command.
+      if (handled === 'error') continue;
+      expect(produced, `action "${handled}" is handled but no command produces it`).toContain(handled);
+    }
   });
 });
